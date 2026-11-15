@@ -14,6 +14,17 @@ export function roundHalf(x: number, d: number): number {
   return x < 0 ? -r : r
 }
 
+/**
+ * Index of the format section Excel applies to n: the second for negatives, the third for zero,
+ * otherwise the first. An empty second section falls back to the first, but an empty third section
+ * means zero shows nothing, which is returned as null.
+ */
+export function pickSection(n: number, count: number, isEmpty: (i: number) => boolean): number | null {
+  if (n < 0 && count > 1 && !isEmpty(1)) return 1
+  if (n === 0 && count > 2) return isEmpty(2) ? null : 2
+  return 0
+}
+
 function formatNumber(x: number, sec: string, signed: boolean): string {
   let prefix = ''
   let suffix = ''
@@ -81,12 +92,10 @@ export function formatText(v: Value, fmt: string): string {
     }
     n = p
   } else n = v ?? 0
-  let sec = sections[0]
-  let signed = true
-  if (n < 0 && sections.length > 1 && sections[1] !== '') {
-    sec = sections[1]
-    signed = false
-  } else if (n === 0 && sections.length > 2 && sections[2] !== '') sec = sections[2]
+  const idx = pickSection(n, sections.length, (i) => sections[i] === '')
+  if (idx === null) return ''
+  const sec = sections[idx]
+  const signed = idx !== 1
   if (/^\s*general\s*$/i.test(sec) || sec === '') return numToText(signed ? n : Math.abs(n))
   if (isDateFormat(sec)) {
     if (n < 0) throw ERR.VALUE
