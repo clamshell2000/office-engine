@@ -317,7 +317,8 @@ interface SelPoints {
   focusOffset: number
 }
 
-function selPoints(root: HTMLElement): SelPoints | null {
+/** both ends of the selection, as nodes inside the shadow root containing `root` when there is one */
+export function selPoints(root: HTMLElement): SelPoints | null {
   const rn = root.getRootNode()
   const s = getSel(root)
   if (!s) return null

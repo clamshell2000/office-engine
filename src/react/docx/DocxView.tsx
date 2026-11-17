@@ -10,7 +10,7 @@ import { Status } from '../common/Status'
 import { ZoomControl, type Zoom } from '../common/ZoomControl'
 import { ContextMenu, MOD, type MenuItem } from '../common/ContextMenu'
 import { PromptDialog, Toast, type PromptSpec } from '../common/Dialog'
-import { domFromPos, getSel, opInsert, posFromDom } from '../edit/input'
+import { domFromPos, getSel, opInsert, posFromDom, selPoints } from '../edit/input'
 import { download, pickFiles } from '../edit/Toolbar'
 import { runsText, type RRun } from '../edit/rich'
 import { DocxEditor, type CommentRange, type DocState, type FormatState } from './DocxEditor'
@@ -86,6 +86,7 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
   const [scrollRef, size] = useSize<HTMLDivElement>()
   const scroll = useScroll(scrollRef)
   const pagesRef = useRef<HTMLDivElement>(null)
+  const [domSel, setDomSel] = useState<number[]>([])
   const editor = useMemo(() => new DocxEditor(client, st, bump), [client, st, bump])
   const colResize = useCallback((bi: number, cols: number[]) => editor.setColumnWidths(bi, cols), [editor])
   const isEditing = viewer.editable && !!done && !done.error
@@ -213,9 +214,12 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
   const first = tops.length ? lowerIndex(tops, scroll.y - pageH * z) : 0
   const last = tops.length ? lowerIndex(tops, scroll.y + size.h + 200) : -1
   const pageCount = complete ? pages.length : 0
-  // keep the page holding the caret mounted so the DOM selection survives scrolling
-  const caretBi = isEditing && editor.input.lastSel ? Number(editor.input.lastSel.f.pa.split('.')[0]) : -1
-  const caretPage = caretBi >= 0 ? pages.findIndex((p) => caretBi >= p.start && caretBi < p.end) : -1
+  // Both ends of the selection stay mounted, so the DOM selection survives scrolling. A removed page moves its end of
+  // the range to the pages container, and a page mounted again there lands after that point: outside a range that ends on it.
+  const pinned = new Set<number>(domSel)
+  const lastSel = isEditing ? editor.input.lastSel : null
+  const caretBi = lastSel ? Number(lastSel.f.pa.split('.')[0]) : -1
+  for (const bi of lastSel ? [Number(lastSel.a.pa.split('.')[0]), caretBi] : []) pinned.add(pages.findIndex((p) => bi >= p.start && bi < p.end))
 
   editor.contentW = contentW
   editor.defaultFont = meta?.font
@@ -241,6 +245,23 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
     : complete
       ? `Page ${cur} of ${pages.length} · ${words.toLocaleString()} words`
       : `Page ${cur} of ${pages.length}+ · loading…`
+
+  // the pages holding the ends of a ranged DOM selection (viewing has no model selection to tell them)
+  useEffect(() => {
+    const pageOf = (root: HTMLElement, n: Node | null) => {
+      const el = n && root.contains(n) ? (n instanceof Element ? n : n.parentElement)?.closest<HTMLElement>('.de-page') : null
+      return el ? Number(el.dataset.page) - 1 : -1
+    }
+    const onSel = () => {
+      const root = pagesRef.current
+      const s = root && selPoints(root)
+      const ranged = !!s && (s.anchorNode !== s.focusNode || s.anchorOffset !== s.focusOffset)
+      const next = root && ranged ? [pageOf(root, s.anchorNode), pageOf(root, s.focusNode)].filter((i) => i >= 0) : []
+      setDomSel((cur) => (next.length === cur.length && next.every((x, i) => x === cur[i]) ? cur : next))
+    }
+    document.addEventListener('selectionchange', onSel)
+    return () => document.removeEventListener('selectionchange', onSel)
+  }, [])
 
   // ---- editing wiring ----
   useEffect(() => {
@@ -798,7 +819,7 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
           }}
         >
           {pages.map((p, i) =>
-            (i < first || i > last) && i !== caretPage ? null : (
+            (i < first || i > last) && !pinned.has(i) ? null : (
               <PageView
                 key={i}
                 index={i}
