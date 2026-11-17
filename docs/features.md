@@ -170,11 +170,11 @@ Diagram sources open as a document holding the drawing (an SVG picture, editable
 
 ### Toolbar
 
-Single row, buttons that don't fit collapse into `⋮`; custom-drawn dropdowns (font/style preview, number formats with examples, ↑↓/Enter/Esc/type-ahead keys, never steals focus from the document); font size box `− 11 +` accepts direct input; cell borders picked from an icon grid; color pickers have a palette plus a **Custom** row (`+` opens the system color picker, recent custom colors are remembered across sessions).
+Single row, buttons that don't fit collapse into `⋮`; custom-drawn dropdowns (font/style preview, number formats with examples, ↑↓/Enter/Esc/type-ahead keys, never steals focus from the document); font size box `− 11 +` accepts direct input; cell borders picked from an icon grid; color pickers have a palette plus a **Custom** row (`+` opens the system color picker, recent custom colors are remembered across sessions). Every icon can be replaced with the host's own set (Lucide, Phosphor or any other) through the `icons` prop, see [API](api.md#icons).
 
 ### Dark mode
 
-`theme="dark"`, or `"auto"` to follow the OS / browser setting (`prefers-color-scheme`), darkens the chrome: bars, toolbar, menus, dialogs, sheet headers and tabs, thumbnails, popovers, scrollbars. Pages, slides and cells keep the colors the document gives them, like paper in a dark PDF viewer. Everything is driven by CSS variables on `.de-root`, so a host can also tune the palette.
+`theme="dark"`, or `"auto"` to follow the OS / browser setting (`prefers-color-scheme`), darkens the chrome: bars, toolbar, menus, dialogs, sheet headers and tabs, thumbnails, popovers, scrollbars. Pages, slides and cells keep the colors the document gives them, like paper in a dark PDF viewer. Everything is driven by design tokens (CSS variables on `.de-root`), which a host sets through a theme object or its own CSS: see [Theming](theming.md).
 
 ## Comments
 
