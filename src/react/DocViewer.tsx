@@ -6,7 +6,7 @@ import { DocxView } from './docx/DocxView'
 import { ViewerContext, type FileOps, type ViewerApi } from './common/Slots'
 import { StatusContext } from './common/Status'
 import { ConfirmDialog, PromptDialog, Toast } from './common/Dialog'
-import { download, Icon } from './edit/Toolbar'
+import { download, Icon, IconsProvider, type Icons } from './edit/Toolbar'
 import { DetailsDialog } from './file/DetailsDialog'
 import { FileMenu, KIND_LABEL, useFileActions, type FileMenuItem } from './file/FileMenu'
 import { importFile, type Imported } from './file/importFile'
@@ -15,7 +15,8 @@ import type { DocKind } from '../core/opc'
 import { extOf, HAS_SOURCE, PLAIN_EXT, PLAIN_FILE, unpackedName, type PlainFormat } from '../core/plain'
 import type { LegacyFormat } from '../core/legacy'
 import { injectStyles } from './injectStyles'
-import { isTextEntry, useDarkTheme, useSize, type Theme } from './common/hooks'
+import { isTextEntry, useSize } from './common/hooks'
+import { useThemeRoot, type Theme } from './theme'
 import { SourceEditor } from './source/SourceEditor'
 import { PictureView } from './picture/PictureView'
 import { PptxView } from './pptx/PptxView'
@@ -52,8 +53,14 @@ export interface DocViewerProps {
   /** Where to inject the stylesheet (document or a shadow root). */
   styleTarget?: Document | ShadowRoot
   /**
-   * Color scheme of the viewer chrome (bars, menus, dialogs): 'light', 'dark' or 'auto' (follows the OS / browser setting).
-   * The document itself keeps its own colors. Default 'light'.
+   * Inject the stylesheet. Default true. Set false when the page loads `@p10node/office-engine/styles.css` itself
+   * (a CSP without inline styles, a cascade layer of its own, a bundler that extracts CSS).
+   */
+  injectStyles?: boolean
+  /**
+   * Color scheme of the viewer chrome (bars, menus, dialogs): 'light', 'dark' or 'auto' (follows the OS / browser setting),
+   * or a theme object with that mode and design token overrides (see docs/theming.md). The document itself keeps its own
+   * colors. Default 'light'.
    */
   theme?: Theme
   onLoad?: (client: DocumentClient) => void
@@ -98,6 +105,12 @@ export interface DocViewerProps {
    * host hears about. Shown by default, written while editing; `false` hides them.
    */
   comments?: CommentOptions | false
+  /**
+   * The host's icons, shown instead of the built-in ones: a map by name (see `ICON_NAMES`) or a resolver
+   * `(name, { size }) => node`; a missing entry, or `undefined` / `null` from the resolver, keeps the built-in icon.
+   * Each is rendered in `span.de-icon`, sized by font-size (1em).
+   */
+  icons?: Icons
 }
 
 const EXT: Record<string, string> = { docx: '.docx', xlsx: '.xlsx', pptx: '.pptx' }
@@ -148,7 +161,7 @@ function fmtBytes(n: number) {
 
 export function DocViewer(props: DocViewerProps) {
   const { src, name, className, style, toolbar = true, toolbarExtra, zoom, thumbnails, headers, credentials, worker, styleTarget, theme, onLoad, onError } = props
-  const dark = useDarkTheme(theme)
+  const root = useThemeRoot(theme, style)
   const { allowEdit = true, allowSave = true, allowDownload = true, fileMenu = true, allowOpen = true, captureSelectAll = true, onSave, onDirtyChange } = props
   const [editing, setEditing] = useState(!!props.editable)
   useEffect(() => {
@@ -157,7 +170,10 @@ export function DocViewer(props: DocViewerProps) {
   const [dirty, setDirtyState] = useState(false)
   const [saving, setSaving] = useState(false)
   const [barEl, setBarEl] = useState<HTMLDivElement | null>(null)
-  useInsertionEffect(() => injectStyles(styleTarget), [styleTarget])
+  const inject = props.injectStyles ?? true
+  useInsertionEffect(() => {
+    if (inject) injectStyles(styleTarget)
+  }, [styleTarget, inject])
   // File → New / Open: a local file shown instead of `src` until the host passes another `src`
   const [opened, setOpened] = useState<Imported | null>(null)
   const [renamed, setRenamed] = useState<string | null>(null)
@@ -531,7 +547,8 @@ export function DocViewer(props: DocViewerProps) {
   else body = <PptxView client={client} initialZoom={zoom} thumbnails={thumbnails} />
 
   return (
-    <div ref={rootRef} className={'de-root' + (dark ? ' de-dark' : '') + (className ? ` ${className}` : '')} style={style} onKeyDown={onKeyDown}>
+    <IconsProvider icons={props.icons}>
+    <div ref={rootRef} className={root.className + (className ? ` ${className}` : '')} style={root.style} onKeyDown={onKeyDown}>
       {toolbar && (
         <div className="de-bar">
           {client && <span className={`de-badge de-badge-${client.kind}`}>{client.info?.from ?? client.info?.converted ?? (client.info?.imported ? IMPORTED_BADGE[client.info.imported] : client.kind)}</span>}
@@ -686,5 +703,6 @@ export function DocViewer(props: DocViewerProps) {
         />
       )}
     </div>
+    </IconsProvider>
   )
 }

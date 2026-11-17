@@ -1,5 +1,6 @@
 /** Excel number-format subset: General, fixed/grouped/percent/scientific/fraction, dates & times, sections & colors. */
 import { dict } from '../dict'
+import { pickSection, roundHalf } from './formula/format'
 
 export const BUILTIN_FORMATS: Record<number, string> = {
   0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 11: '0.00E+00',
@@ -21,7 +22,7 @@ type Tok =
   | { k: 'slash' }
   | { k: 'date'; v: string }
   | { k: 'text' }
-  | { k: 'elapsed'; v: 'h' | 'm' | 's' }
+  | { k: 'elapsed'; v: 'h' | 'm' | 's'; n: number }
 
 interface Section {
   toks: Tok[]
@@ -97,7 +98,7 @@ function parseSection(src: string): Section {
       if (COLORS[bl]) color = COLORS[bl]
       else if (/^color\s*\d+$/.test(bl)) color = undefined
       else if (/^(h+|m+|s+)$/.test(bl)) {
-        toks.push({ k: 'elapsed', v: bl[0] as 'h' | 'm' | 's' })
+        toks.push({ k: 'elapsed', v: bl[0] as 'h' | 'm' | 's', n: bl.length })
         isDate = true
       } else if (body.startsWith('$')) {
         const sym = body.slice(1).split('-')[0]
@@ -216,7 +217,7 @@ function formatNumber(v: number, sec: Section): string {
   val /= Math.pow(1000, scale)
   const grouping = toks.some((t, i) => t.k === 'comma' && i > firstDigit && i < lastDigit)
 
-  if (slashIdx >= 0) return formatFraction(val, sec, v < 0)
+  if (slashIdx >= 0) return formatFraction(val, sec)
 
   const intEnd = dotIdx >= 0 ? dotIdx : expIdx >= 0 ? expIdx : lastDigit + 1
   const decToks = dotIdx >= 0 ? toks.slice(dotIdx + 1, expIdx >= 0 ? expIdx : undefined).filter((t) => t.k === 'digit') : []
@@ -233,10 +234,11 @@ function formatNumber(v: number, sec: Section): string {
       mant = mant / Math.pow(10, exp)
     }
   }
-  let fixed = mant.toFixed(decCount)
+  // toFixed on the raw double rounds 2.675 down; Excel rounds the 15-digit decimal value
+  let fixed = roundHalf(mant, decCount).toFixed(decCount)
   if (expIdx >= 0 && Number(fixed) >= 10 && toks.slice(0, intEnd).filter((t) => t.k === 'digit').length <= 1) {
     exp += 1
-    fixed = (mant / 10).toFixed(decCount)
+    fixed = roundHalf(mant / 10, decCount).toFixed(decCount)
   }
   let [intPart, decPart = ''] = fixed.split('.')
   // decimals: # trims trailing zeros, ? pads with spaces
@@ -312,7 +314,8 @@ function formatNumber(v: number, sec: Section): string {
   return out
 }
 
-function formatFraction(val: number, sec: Section, neg: boolean): string {
+/** Formats |val| as a fraction; the sign is added by formatValue. */
+function formatFraction(val: number, sec: Section): string {
   const toks = sec.toks
   const slash = toks.findIndex((t) => t.k === 'slash')
   const denToks = toks.slice(slash + 1).filter((t) => t.k === 'digit')
@@ -338,10 +341,9 @@ function formatFraction(val: number, sec: Section, neg: boolean): string {
       }
     }
   }
-  const sign = neg ? '-' : ''
-  if (bestN === 0) return sign + (hasWhole ? String(whole) : '0')
-  if (bestN === bestD) return sign + String(whole + 1)
-  return sign + (hasWhole && whole ? whole + ' ' : '') + bestN + '/' + bestD
+  if (bestN === 0) return hasWhole ? String(whole) : '0'
+  if (bestN === bestD) return String(whole + 1)
+  return (hasWhole && whole ? whole + ' ' : '') + bestN + '/' + bestD
 }
 
 export function serialToDate(serial: number, date1904 = false): Date {
@@ -358,16 +360,28 @@ export function serialToDate(serial: number, date1904 = false): Date {
 }
 
 function formatDate(v: number, sec: Section, date1904: boolean): string {
-  const d = serialToDate(v, date1904)
   const toks = sec.toks
   const hasAmPm = toks.some((t) => t.k === 'date' && /^(am\/pm|a\/p)$/i.test(t.v ?? ''))
+  // Excel rounds the time to the smallest unit shown (seconds, or the digits of ".0") and only
+  // then splits it into fields, so 23:59:59.6 shown as h:mm:ss carries into the next day.
+  const fracDigits = Math.min(3, Math.max(0, ...toks.map((t) => (t.k === 'date' && t.v[0] === '.' ? t.v.length - 1 : 0))))
+  const unit = Math.pow(10, fracDigits)
+  let day = Math.floor(v)
+  let ticks = Math.round((v - day) * 86400 * unit)
+  if (ticks >= 86400 * unit) {
+    day++
+    ticks -= 86400 * unit
+  }
+  const totalTicks = day * 86400 * unit + ticks
+  const d = serialToDate(day, date1904)
   const Y = d.getUTCFullYear()
   const M = d.getUTCMonth()
   const D = d.getUTCDate()
-  const H = d.getUTCHours()
-  const Mi = d.getUTCMinutes()
-  const S = d.getUTCSeconds()
-  const msec = d.getUTCMilliseconds()
+  const secOfDay = Math.floor(ticks / unit)
+  const H = Math.floor(secOfDay / 3600)
+  const Mi = Math.floor((secOfDay % 3600) / 60)
+  const S = secOfDay % 60
+  const frac = ticks % unit
   const pad = (n: number, w = 2) => String(n).padStart(w, '0')
   let out = ''
   // decide month vs minute for 'm'/'mm'
@@ -387,10 +401,8 @@ function formatDate(v: number, sec: Section, date1904: boolean): string {
   toks.forEach((t, idx) => {
     if (t.k === 'lit') return (out += t.v)
     if (t.k === 'elapsed') {
-      const total = v * 86400
-      if (t.v === 'h') out += Math.floor(total / 3600)
-      else if (t.v === 'm') out += Math.floor(total / 60)
-      else out += Math.round(total)
+      const secs = t.v === 'h' ? 3600 : t.v === 'm' ? 60 : 1
+      out += pad(Math.floor(totalTicks / (secs * unit)), t.n)
       return
     }
     if (t.k !== 'date') {
@@ -430,7 +442,7 @@ function formatDate(v: number, sec: Section, date1904: boolean): string {
         out += tv.length >= 2 ? pad(S) : String(S)
         break
       case '.':
-        out += '.' + pad(Math.floor(msec / Math.pow(10, 3 - (tv.length - 1))), tv.length - 1)
+        out += '.' + pad(Math.floor(frac / Math.pow(10, fracDigits - (tv.length - 1))), tv.length - 1)
         break
       case 'A':
         {
@@ -461,10 +473,11 @@ export function formatValue(v: number, fmt: string | undefined, date1904 = false
       return op === '<' ? v < c : op === '<=' ? v <= c : op === '>' ? v > c : op === '>=' ? v >= c : op === '=' ? v === c : v !== c
     }
     sec = secs.find(test) ?? secs.find((s) => !s.cond) ?? secs[0]
-  } else if (secs.length >= 3 && v === 0 && secs[2].toks.length) sec = secs[2]
-  else if (secs.length >= 2 && v < 0 && secs[1].toks.length) {
-    sec = secs[1]
-    val = -v
+  } else {
+    const idx = pickSection(v, secs.length, (i) => !secs[i].toks.length)
+    if (idx === null) return { text: '' }
+    sec = secs[idx]
+    if (idx === 1) val = -v
   }
   if (sec.isDate) {
     if (v < 0 || v > 2958465) return { text: '#'.repeat(8) }

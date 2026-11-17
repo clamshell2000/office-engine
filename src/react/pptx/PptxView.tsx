@@ -11,7 +11,7 @@ import { PptxEditor } from './PptxEditor'
 import { PptxToolbar, type AlignTo, type Arrange, type Rotate, type SlideCmd } from './PptxToolbar'
 import { ContextMenu, MOD, type MenuItem } from '../common/ContextMenu'
 import { Presenter } from './Presenter'
-import { pickFiles } from '../edit/Toolbar'
+import { Icon, pickFiles } from '../edit/Toolbar'
 import { SlideView, type SlideEditing } from './Slide'
 import { publishLocal, registerHost } from '../../collab/hosts'
 import { initialsOf, type CommentThread } from '../../core/comments'
@@ -86,7 +86,7 @@ export function useSlide(client: DocumentClient, index: number): SlideModel | { 
 export function SlideSlot(props: { client: DocumentClient; index: number; meta: PresentationMeta; scale: number; live: boolean; editing?: SlideEditing; overlay?: ReactNode }) {
   const { client, index, meta, scale, live, editing, overlay } = props
   const model = useSlide(client, index)
-  if (!model) return <div className="de-slide" style={{ width: meta.w * scale, height: meta.h * scale, background: '#fff' }} />
+  if (!model) return <div className="de-slide" style={{ width: meta.w * scale, height: meta.h * scale, background: 'var(--de-page, #fff)' }} />
   if ('error' in model) {
     return (
       <div className="de-slide de-ph" style={{ width: meta.w * scale, height: meta.h * scale, display: 'flex' }}>
@@ -788,7 +788,8 @@ export function PptxView({ client, onStatus, initialZoom = 'fit', thumbnails = t
         <ZoomControl zoom={zoom} effective={scale} onChange={setZoom} />
         {!viewer.editable && (
           <button type="button" className="de-mode de-present-btn" title="Present (F5)" onClick={() => setPresenting(current)}>
-            ▶ Present
+            <Icon name="present" size={14} />
+            Present
           </button>
         )}
         <Status text={`Slide ${current + 1} of ${meta.count}`} onStatus={onStatus} />
