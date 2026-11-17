@@ -127,4 +127,38 @@ describe('collab xlsx', () => {
       x.client.destroy()
     }
   }, 30_000)
+
+  // A rebase rolls a local formatting op back, and the styles it derived with it. The index it freed is then given to
+  // another style: what was derived *from* that index before must not be reused for it.
+  test('a style index freed by a rebase and derived again formats like one never freed', async () => {
+    const fmt = (id: string, r: number, c: number, patch: object) => ({ t: 'fmt', id, sheet: '', range: { r0: r, c0: c, r1: r, c1: c }, patch })
+    const run = async (rebased: boolean) => {
+      const client = await DocumentClient.open(file('sample.xlsx'), { worker: false })
+      await client.call('xlsx.load', 0)
+      await sleep(20)
+      const sheet = client.info.xlsx!.sheets[0].path
+      const apply = async (op: ReturnType<typeof fmt>) => (await client.direct('collab.xlsx.apply', { ...op, sheet } as never)).rec as number
+      // D5 (currency) turns blue
+      await apply(fmt('0', 4, 3, { fill: '#00ccff' }))
+      if (rebased) {
+        // D3 (currency): yellow derives a new style, blue on top of it is the style D5 already has
+        const yellow = await apply(fmt('p1', 2, 3, { fill: '#ffee00' }))
+        const blue = await apply(fmt('p2', 2, 3, { fill: '#00ccff' }))
+        await client.direct('collab.xlsx.revert', blue)
+        await client.direct('collab.xlsx.revert', yellow)
+      }
+      // F3 (percent): bold takes the freed index, blue is derived from it
+      await apply(fmt('1', 2, 5, { b: true }))
+      await apply(fmt('2', 2, 5, { fill: '#00ccff' }))
+      const out = await dump(client)
+      client.destroy()
+      return out
+    }
+    const plain = await run(false)
+    // F3 is still a percentage
+    expect(JSON.parse(plain)[1][2][1][5][1]).toBe('8.4%')
+    const got = await run(true)
+    expect(JSON.parse(got)[1][2][1][5][1]).toBe('8.4%')
+    expect(got).toBe(plain)
+  })
 })

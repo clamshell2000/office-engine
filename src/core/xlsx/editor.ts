@@ -299,7 +299,8 @@ class StyleEditor {
       const idx = this.found.get(name)
       if (idx) for (const [k, v] of idx) if (v >= len) idx.delete(k)
     }
-    for (const [k, v] of this.cache) if (v >= m.cellXfs) this.cache.delete(k)
+    // a dropped index is given to another style later: forget what was derived from it too, not only what derived to it
+    for (const [k, v] of this.cache) if (v >= m.cellXfs || parseInt(k) >= m.cellXfs) this.cache.delete(k)
   }
 }
 
