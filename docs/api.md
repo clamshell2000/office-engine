@@ -135,12 +135,18 @@ The views style themselves from design tokens on their root: `useThemeRoot(theme
 Every icon the viewer draws, toolbars, menus, zoom, outline, Present and the add-sheet tab included, has a name (`IconName`, all of them in `ICON_NAMES`). `icons` replaces any of them, either as a map or as a resolver that is called for every icon:
 
 ```tsx
-import { DocViewer, type IconName } from '@p10node/office-engine'
+import { DocViewer, type IconName, type Icons } from '@p10node/office-engine'
 
-<DocViewer src={file} icons={{ undo: <MyUndo />, redo: <MyRedo /> }} />
+// Define outside the host component so the map keeps its identity across renders.
+const icons: Icons = { undo: <MyUndo />, redo: <MyRedo /> }
+
+<DocViewer src={file} icons={icons} />
 ```
 
 A name the map leaves out, or a resolver returning `undefined` / `null`, keeps the built-in icon, so a set can cover just part of the names. Your icon is rendered inside `<span class="de-icon">` whose font-size is the icon's size in pixels: draw it at `1em` (a bare `<svg>` child is sized to `1em` for you) and with `currentColor`, so it follows the theme. The resolver also gets `{ size }` in pixels.
+
+The names exported in `ICON_NAMES` are stable public keys, including names originally used only inside the viewer.
+New names may be added; existing keys must not be renamed as an internal refactor.
 
 With [Lucide](https://lucide.dev) (`lucide-react`):
 
