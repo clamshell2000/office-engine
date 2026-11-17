@@ -499,11 +499,17 @@ export class DocxEditor implements RichHost<Paragraph> {
     const sent = new Set<Paragraph>(next)
     const op: EditOp = { anchor, list: specs, remove, want: convert }
     this.inflight++
+    let applied = false
     this.client
       .call('docx.edit', op)
-      .then((res) => this.applyResult(res, sent))
+      .then((res) => { applied = this.applyResult(res, sent) })
       .catch((e) => console.error('[office-engine] edit failed', e))
-      .finally(() => this.inflight--)
+      .finally(() => {
+        this.inflight--
+        // Conversion can change the look after replace's optimistic notification. Use the selection now,
+        // after completing the edit, so the toolbar also sees the current history and busy state.
+        if (applied) this.emitState(this.input.sel())
+      })
   }
 
   get busy() {
@@ -662,8 +668,8 @@ export class DocxEditor implements RichHost<Paragraph> {
     }
   }
 
-  private applyResult(res: EditResult, sent: Set<Paragraph>) {
-    if (this.input.isComposing) return
+  private applyResult(res: EditResult, sent: Set<Paragraph>): boolean {
+    if (this.input.isComposing) return false
     let touched = false
     // the caret inside a rebuilt paragraph is put back after the render (same offsets: the text is the same)
     const sel = this.input.readSel()
@@ -700,9 +706,10 @@ export class DocxEditor implements RichHost<Paragraph> {
         touched = true
       }
     }
-    if (!touched) return
+    if (!touched) return false
     if (sel && !this.pendingSel && (rebuilt.has(sel.a.pa) || rebuilt.has(sel.f.pa))) this.pendingSel = sel
     this.changed()
+    return true
   }
 
   // ---------------------------------------------------------------- history
