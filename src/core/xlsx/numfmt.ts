@@ -1,6 +1,6 @@
 /** Excel number-format subset: General, fixed/grouped/percent/scientific/fraction, dates & times, sections & colors. */
 import { dict } from '../dict'
-import { pickSection, roundHalf } from './formula/format'
+import { pickSection } from './formula/format'
 
 export const BUILTIN_FORMATS: Record<number, string> = {
   0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 11: '0.00E+00',
@@ -199,6 +199,23 @@ function group(intStr: string): string {
   return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
 
+/** Round a nonnegative value's 15 significant decimal digits without returning to binary. */
+function fixedDecimal(v: number, decimals: number): string {
+  if (!Number.isFinite(v)) return String(v)
+  const [mantissa, exponent] = v.toExponential(14).split('e')
+  let coefficient = BigInt(mantissa.replace('.', ''))
+  const shift = Number(exponent) - 14 + decimals
+  let digits: string
+  if (shift >= 0) digits = coefficient.toString() + '0'.repeat(shift)
+  else {
+    const divisor = 10n ** BigInt(-shift)
+    coefficient = (coefficient + divisor / 2n) / divisor
+    digits = coefficient.toString()
+  }
+  digits = digits.padStart(decimals + 1, '0')
+  return decimals ? digits.slice(0, -decimals) + '.' + digits.slice(-decimals) : digits
+}
+
 function formatNumber(v: number, sec: Section): string {
   const toks = sec.toks
   let val = Math.abs(v)
@@ -234,11 +251,12 @@ function formatNumber(v: number, sec: Section): string {
       mant = mant / Math.pow(10, exp)
     }
   }
-  // toFixed on the raw double rounds 2.675 down; Excel rounds the 15-digit decimal value
-  let fixed = roundHalf(mant, decCount).toFixed(decCount)
+  // Keep the rounded decimal digits: converting back to a double can add spurious digits
+  // at large magnitudes, and toFixed switches to exponential notation at 1e21.
+  let fixed = fixedDecimal(mant, decCount)
   if (expIdx >= 0 && Number(fixed) >= 10 && toks.slice(0, intEnd).filter((t) => t.k === 'digit').length <= 1) {
     exp += 1
-    fixed = roundHalf(mant / 10, decCount).toFixed(decCount)
+    fixed = fixedDecimal(mant / 10, decCount)
   }
   let [intPart, decPart = ''] = fixed.split('.')
   // decimals: # trims trailing zeros, ? pads with spaces
@@ -362,8 +380,8 @@ export function serialToDate(serial: number, date1904 = false): Date {
 function formatDate(v: number, sec: Section, date1904: boolean): string {
   const toks = sec.toks
   const hasAmPm = toks.some((t) => t.k === 'date' && /^(am\/pm|a\/p)$/i.test(t.v ?? ''))
-  // Excel rounds the time to the smallest unit shown (seconds, or the digits of ".0") and only
-  // then splits it into fields, so 23:59:59.6 shown as h:mm:ss carries into the next day.
+  // Excel rounds to seconds (also for date-only formats), or the digits of ".0", before
+  // splitting into fields, so 23:59:59.6 carries into the next day even with m/d/yyyy.
   const fracDigits = Math.min(3, Math.max(0, ...toks.map((t) => (t.k === 'date' && t.v[0] === '.' ? t.v.length - 1 : 0))))
   const unit = Math.pow(10, fracDigits)
   let day = Math.floor(v)
