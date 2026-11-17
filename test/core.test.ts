@@ -52,6 +52,18 @@ describe('numfmt', () => {
     expect(f(45291, 'm/d/yyyy')).toBe('12/31/2023')
     expect(f(1.5, '[h]:mm:ss')).toBe('36:00:00')
   })
+  // https://github.com/p10node/office-engine/issues/3
+  test('matches Excel on the issue #3 repros', () => {
+    expect(f(-1.5, '# ?/?')).toBe('-1 1/2')
+    expect(f(-0.5, '?/?')).toBe('-1/2')
+    expect(f(0.00001, 'h:mm:ss')).toBe('0:00:01')
+    expect(f(99.999, 'h:mm:ss')).toBe('23:58:34')
+    expect(f(0.12345, 'mm:ss.0')).toBe('57:46.1')
+    expect(f(0, '0;-0;;@')).toBe('')
+    expect(f(0.001, '[mm]:ss')).toBe('01:26')
+    expect(f(2.675, '0.00')).toBe('2.68')
+    expect(f(1.005, '0.00')).toBe('1.01')
+  })
 })
 
 describe('docx', () => {
