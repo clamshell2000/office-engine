@@ -146,6 +146,7 @@ export function useFileActions(o: FileActionsOptions): FileActions {
     if (action === 'original') return c.downloadOriginal()
     if (action === 'picture') return c.picture?.download()
     if (!ops) throw new Error('The document is still loading — try again in a moment')
+    await ops.flush?.()
     if (action.startsWith('text:')) {
       const f = TEXT_FORMATS[c.kind].find((x) => 'text:' + x.id === action)
       if (!f) return

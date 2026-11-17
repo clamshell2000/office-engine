@@ -185,6 +185,15 @@ export function DocViewer(props: DocViewerProps) {
   // the name is part of what is loaded: Rename only changes what is shown and saved
   // a preview of the edited source keeps the one shown until it is ready
   const { client, error, loading, progress } = useDocument(opened ? opened.src : src, { name: loadName, headers, credentials, worker }, !!opened?.live)
+  // Save ownership follows the document, including a source change before its client is ready.
+  const saveSession = useMemo(() => ({ live: true, saving: false, revision: 0 }), [client, src, opened])
+  useEffect(() => {
+    saveSession.live = true
+    setSaving(false)
+    return () => {
+      saveSession.live = false
+    }
+  }, [saveSession])
   const docName = renamed ?? loadName
   const collab = useCollab(client, props.collab)
   const srcFormat = client?.info?.imported
@@ -309,12 +318,15 @@ export function DocViewer(props: DocViewerProps) {
     if (client) openedDirty.current = false
   }, [client])
   const setDirty = useCallback(
-    (d: boolean) =>
+    (d: boolean) => {
+      if (!saveSession.live) return
+      if (d) saveSession.revision++
       setDirtyState((prev) => {
         if (prev !== d) onDirtyChange?.(d)
         return d
-      }),
-    [onDirtyChange],
+      })
+    },
+    [onDirtyChange, saveSession],
   )
   const baseName = (renamed ?? (client?.name || docName || 'document')).replace(/\.[^.]+$/, '')
   const fileName = baseName + (client ? EXT[client.kind] : '')
@@ -334,22 +346,30 @@ export function DocViewer(props: DocViewerProps) {
   }, [client, rebuilds, saveFormat, code])
   // saving without onSave means downloading
   const canSave = allowSave && (!!onSave || allowDownload)
-  const save = useCallback(async () => {
-    if (!client || saving || !canSave) return
+  const saveFile = useCallback(async (original = false) => {
+    if (!client || !saveSession.live || saveSession.saving || !(original ? allowDownload : canSave)) return
+    saveSession.saving = true
     setSaving(true)
     try {
-      const blob = saveFormat ? new Blob([await sourceText()], { type: `${PLAIN_FILE[saveFormat].mime};charset=utf-8` }) : await client.call('save')
-      if (onSave) await onSave(blob, saveName)
-      else download(blob, saveName)
-      setDirty(false)
+      await fileOps.current?.flush?.()
+      if (!saveSession.live) return
+      const revision = saveSession.revision
+      const blob = !original && saveFormat ? new Blob([await sourceText()], { type: `${PLAIN_FILE[saveFormat].mime};charset=utf-8` }) : await client.call('save')
+      if (!saveSession.live) return
+      if (!original && onSave) await onSave(blob, saveName)
+      else download(blob, original ? fileName : saveName)
+      if (saveSession.live && saveSession.revision === revision && (!original || !onSave)) setDirty(false)
     } catch (e) {
+      if (!saveSession.live) return
       onError?.(e as Error)
       console.error('[office-engine] save failed', e)
       setToast((e as Error).message)
     } finally {
-      setSaving(false)
+      saveSession.saving = false
+      if (saveSession.live) setSaving(false)
     }
-  }, [client, saving, canSave, onSave, saveName, saveFormat, sourceText, setDirty, onError])
+  }, [client, saveSession, canSave, allowDownload, onSave, fileName, saveName, saveFormat, sourceText, setDirty, onError])
+  const save = useCallback(() => saveFile(), [saveFile])
   // an edit in the document: its source (Markdown / HTML) is built again when shown or saved
   const setDocDirty = useCallback(
     (d: boolean) => {
@@ -474,12 +494,7 @@ export function DocViewer(props: DocViewerProps) {
         importFile(file).then(show, (e: Error) => setToast(e.message))
       }),
     save,
-    downloadOriginal: async () => {
-      if (!client) return
-      download(await client.call('save'), fileName)
-      // without onSave, saving is downloading
-      if (!onSave) setDirty(false)
-    },
+    downloadOriginal: () => saveFile(true),
     picture: isPicture
       ? {
           label: 'SVG picture',

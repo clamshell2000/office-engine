@@ -6,6 +6,8 @@ import type { Printable } from '../file/print'
 
 /** What the active view offers to the File menu. */
 export interface FileOps {
+  /** Commit and await pending editor work before serializing the document. Rejects on failure. */
+  flush?(): Promise<void>
   /** all pages, for PDF / print and HTML */
   printable(): Promise<Printable>
   /** text formats: 'txt' / 'md' / 'html' (documents; 'txt' for presentations), 'csv' / 'tsv' (current sheet; a Blob, as a sheet can be large) */

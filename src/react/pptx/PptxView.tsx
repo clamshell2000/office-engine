@@ -170,7 +170,9 @@ const THUMB_W = 188
 export function PptxView({ client, onStatus, initialZoom = 'fit', thumbnails = true }: PptxViewProps) {
   const viewer = useViewer()
   const meta = client.info.pptx as PresentationMeta
+  const editor = useMemo(() => new PptxEditor(client), [client])
   useFileOps({
+    flush: () => editor.flush(),
     printable: async () => {
       const m = client.info.pptx as PresentationMeta
       // hidden flags are known once a slide is parsed: filter on the models
@@ -207,7 +209,6 @@ export function PptxView({ client, onStatus, initialZoom = 'fit', thumbnails = t
   const [zoom, setZoom] = useState<Zoom>(initialZoom)
   const showThumbs = thumbnails && rootSize.w >= 720 && meta.count > 1
   const [, bump] = useForceUpdate()
-  const editor = useMemo(() => new PptxEditor(client), [client])
   const caretAt = useRef<{ x: number; y: number } | null>(null)
   const textRoot = useRef<HTMLDivElement | null>(null)
   const slidesRef = useRef<HTMLDivElement>(null)
@@ -269,7 +270,7 @@ export function PptxView({ client, onStatus, initialZoom = 'fit', thumbnails = t
     if (!viewer.editable) stopEditing()
     return () => editor.end()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewer.editable])
+  }, [editor, viewer.editable])
 
   // keyboard first: slide navigation and shortcuts work without a click (a focused host page control keeps the focus)
   useEffect(() => void claimFocus(scrollRef.current), []) // eslint-disable-line react-hooks/exhaustive-deps
