@@ -143,6 +143,25 @@ test('failed slide commits survive ending text editing; failed serialization als
   expect(v.errors.every((e) => /Slide commit rejected|Serialization rejected/.test(e))).toBe(true)
 })
 
+test('a slide edit the worker refuses every time stops failing saves once it is given up', async () => {
+  const v = await controlledViewer('failEdit')
+  await editTitle(v)
+  await v.page.keyboard.type('Never accepted')
+  await v.page.keyboard.press('Escape')
+  await v.page.waitForFunction(() => window.__pptxSave.calls.includes('pptx.setText'))
+  // sent again at each save, refused again: after the third refusal it is dropped
+  await v.page.keyboard.press('ControlOrMeta+s')
+  expect((await v.waitEvent('error')).message).toBe('Slide commit rejected')
+  await v.page.keyboard.press('ControlOrMeta+s')
+  expect((await v.waitEvent('error', 2)).message).toBe('Slide commit rejected')
+  expect(await v.events('save')).toHaveLength(0)
+  // the next save goes through, without the edit
+  await v.page.keyboard.press('ControlOrMeta+s')
+  const file = await v.waitEvent('save')
+  expect((await savedRuns(file.b64)).some((r) => r.text === 'Never accepted')).toBe(false)
+  expect(await v.page.evaluate(() => window.__pptxSave.calls.filter((c) => c === 'pptx.setText').length)).toBe(3)
+})
+
 test('edits during host save and host write failures remain dirty until the next successful save', async () => {
   const v = await controlledViewer('holdHost')
   await editTitle(v)

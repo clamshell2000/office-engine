@@ -74,6 +74,9 @@ export function toTPara(p: EPara, num = 0): TPara {
 }
 
 /** Text editing of one shape on one slide. */
+/** times an edit the worker refused is sent again (at the next commit or save) before it is given up */
+const MAX_COMMIT_TRIES = 3
+
 export class PptxEditor implements RichHost<EPara> {
   readonly input: RichInput
   paras: EPara[] = []
@@ -86,7 +89,7 @@ export class PptxEditor implements RichHost<EPara> {
   private pend: { s: Partial<RunStyle>; d: PRunSet; at: { pa: string; o: number } } | null = null
   private timer: ReturnType<typeof setTimeout> | undefined
   private changedSinceCommit = false
-  private commits: { slide: number; sid: number; specs: PParaSpec[] }[] = []
+  private commits: { slide: number; sid: number; specs: PParaSpec[]; failed?: number }[] = []
   private committing?: Promise<void>
   onChange?: () => void
   onCommitted?: (slide: number, model: SlideModel) => void
@@ -260,11 +263,19 @@ export class PptxEditor implements RichHost<EPara> {
 
   private async drainCommits() {
     while (this.commits.length) {
-      const { slide, sid, specs } = this.commits[0]
-      const model = await this.client.call('pptx.setText', slide, sid, specs)
-      // Retain a failed snapshot for retry, including after the active shape changes.
+      const c = this.commits[0]
+      let model: SlideModel
+      try {
+        model = await this.client.call('pptx.setText', c.slide, c.sid, c.specs)
+      } catch (e) {
+        // Retain a failed snapshot for retry, including after the active shape changes: but not for ever. An edit the
+        // worker refuses every time would fail every save from here on, the edits made after it never written.
+        c.failed = (c.failed ?? 0) + 1
+        if (c.failed >= MAX_COMMIT_TRIES) this.commits.shift()
+        throw e
+      }
       this.commits.shift()
-      this.onCommitted?.(slide, model)
+      this.onCommitted?.(c.slide, model)
     }
   }
 
