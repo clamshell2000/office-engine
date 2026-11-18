@@ -24,7 +24,7 @@ import { PageSetupDialog } from './PageSetupDialog'
 import { mergeSource } from '../../core/plainmerge'
 import { docxBodyHtml, docxToHtml, docxToMarkdown, docxToText, pictureData } from '../file/text'
 import { BlockView, contextual, type RenderCtx } from './render'
-import { paginate, type PageSlice } from './paginate'
+import { pageHF, paginate, type PageSlice } from './paginate'
 
 const PX = 4 / 3
 const GAP = 16
@@ -963,11 +963,8 @@ function PageView({ index, count, slice, blocks, meta, page, top, left, height, 
     [client, index, count, editing, colResize],
   )
   const hfCtx = useMemo<RenderCtx>(() => ({ ...ctx, editable: false }), [ctx])
-  const first = index === 0 && meta?.titlePg
-  const header = first ? meta?.firstHeader : meta?.header
-  const footer = first ? meta?.firstFooter : meta?.footer
-  const hk: HFKind = first ? 'firstHeader' : 'header'
-  const fk: HFKind = first ? 'firstFooter' : 'footer'
+  // the first page's, the even pages' (when the file has different odd and even ones) or the default
+  const { header, footer, hk, fk } = pageHF(meta ?? undefined, index)
   const items = []
   for (let i = slice.start; i < slice.end; i++) {
     const b = blocks[i]
