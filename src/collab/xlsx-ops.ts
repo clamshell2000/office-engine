@@ -164,7 +164,7 @@ const ALL: Range = { r0: 0, c0: 0, r1: Number.MAX_SAFE_INTEGER, c1: Number.MAX_S
 const multiline = (op: XOp) => op.t === 'set' && op.cells.some((c) => c.input.includes('\n'))
 
 /** a cell edit that may give its cell a number format (derived style): a date or a percentage typed into a cell without one */
-const formats = (op: XOp) => op.t === 'set' && op.cells.some((c) => /%\s*$|^\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(c.input))
+const formats = (op: XOp) => op.t === 'set' && op.cells.some((c) => /^\s*[=+@-]|[$€£¥₫₩₹₽₱฿%]|^\s*\d{1,3}(,\d{3})+|^\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(c.input))
 
 export function footprint(op: XOp): { sheet: string; range: Range } | null {
   switch (op.t) {

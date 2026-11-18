@@ -680,7 +680,8 @@ describe('xlsx: what is typed (N1-006, N1-007, N1-024, P2-015)', () => {
     const re = await openBook((await o.save()).blob)
     expect(await re.shown(0, 0, 1)).toBe('50%')
     expect(await re.shown(0, 2, 1)).toBe('2024-01-15')
-    expect(await re.shown(0, 4, 1)).toBe('45307')
+    // (a date moved by a day shows as a date: the format of the cell it reads)
+    expect(await re.shown(0, 4, 1)).toBe('2024-01-16')
     // undone in one step, format with it
     await o.set(0, 'D1', '75%')
     await o.engine.call('xlsx.undo', [])

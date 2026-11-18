@@ -15,7 +15,7 @@ import { BUILTIN_FORMATS, isDateFormat } from './numfmt'
 import { parseSheetStyles } from './styles'
 import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
 import { expandShared, overflows, restore, setColWidth, setFormula, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
-import { dropSheetInFormula, moveRefsInFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type MoveOp } from './formula'
+import { dropSheetInFormula, moveRefsInFormula, parseFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type Ast, type MoveOp, type RefAddr } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
 import { tsvCell } from './clip'
 import { followParts, followSheetTail, renameInCharts, sheetTail, type PartEdit } from './follow'
@@ -57,6 +57,9 @@ export interface Change {
   /** parts rewritten with it (defined names, tables, drawings, charts following rows / columns that moved) */
   parts?: PartEdit[]
 }
+
+/** the functions that give a date: a cell without a format shows their result as one */
+const DATE_FUNCTIONS = new Set(['TODAY', 'DATE', 'DATEVALUE', 'EDATE', 'EOMONTH', 'WORKDAY'])
 
 /** cells an edit may touch at once (each is kept for Undo) */
 const MAX_CELLS_AT_ONCE = 2_000_000
@@ -165,6 +168,53 @@ interface InputContext {
 
 const noQuotes = (fmt: string) => fmt.replace(/"[^"]*"|\\.|\[[^\]]*\]/g, '')
 
+const ERROR_INPUT = /^#(?:N\/A|DIV\/0!|VALUE!|REF!|NAME\?|NUM!|NULL!)$/i
+const MONEY = '$€£¥₫₩₹₽₱฿'
+const AMOUNT = new RegExp(`^([-+]?)\\s*([${MONEY}]?)\\s*(\\d{1,3}(?:,\\d{3})+|\\d+)(\\.\\d+)?\\s*([${MONEY}]?)$`)
+
+/**
+ * An amount typed with thousands separators and / or a currency sign ("1,234,567", "$50", "€1,200.50", "50 ₫"): the
+ * number, and the format that shows it as typed. Not a plain number (read before), not two signs.
+ */
+function amountInput(t: string): { n: number; fmt: string } | undefined {
+  const m = AMOUNT.exec(t)
+  if (!m || (m[2] && m[5]) || (!m[2] && !m[5] && !m[3].includes(','))) return undefined
+  const n = Number(m[3].replace(/,/g, '') + (m[4] ?? ''))
+  if (!Number.isFinite(n)) return undefined
+  // (a currency shows cents when cents were typed)
+  const digits = '#,##0' + (m[4] ? '.' + '0'.repeat(m[2] || m[5] ? Math.max(2, m[4].length - 1) : m[4].length - 1) : '')
+  const fmt = m[2] ? `"${m[2]}"${digits}` : m[5] ? `${digits}" ${m[5]}"` : digits
+  return { n: m[1] === '-' ? -n : n, fmt }
+}
+
+/** whether text reads as a formula that reads a cell or calls a function (what makes "+A1+B1" one, and not "-5" or "- item") */
+function readsOrCalls(text: string): boolean {
+  let ast: Ast
+  try {
+    ast = parseFormula(text)
+  } catch {
+    return false
+  }
+  const has = (n: Ast): boolean => {
+    switch (n.type) {
+      case 'ref':
+      case 'range':
+      case 'call':
+        return true
+      case 'unary':
+      case 'percent':
+        return has(n.arg)
+      case 'binary':
+        return has(n.left) || has(n.right)
+      case 'union':
+        return n.items.some(has)
+      default:
+        return false
+    }
+  }
+  return has(ast)
+}
+
 /**
  * The cell for what was typed. `want`: the number format to give a cell that has none, so that what was typed as a
  * date or a percentage shows as one (as Excel does).
@@ -176,6 +226,15 @@ function parseInput(input: string, style: number, ctx: InputContext = { fmt: '',
   if (input.startsWith('=') && input.length > 1) return { e: [T_STR, input, style], f: input.slice(1) }
   const t = input.trim()
   const general = !ctx.fmt || /^general$/i.test(ctx.fmt)
+  // "+A1+B1", "-A1", "@SUM(A1:A3)": a formula as a numeric keypad (or Lotus) starts one. Only what reads a cell or
+  // calls a function: "-5" is a number, "- item" and "+84 912 345 678" are text.
+  if (t.length > 1 && (t[0] === '+' || t[0] === '-' || t[0] === '@')) {
+    const f = t[0] === '@' ? t.slice(1) : t
+    if (readsOrCalls(f)) return { e: [T_STR, '=' + f, style], f }
+  }
+  if (ERROR_INPUT.test(t)) return { e: [T_ERR, t.toUpperCase(), style] }
+  // more digits than a number holds (a card number, an id): kept as typed, where a number would end in zeros
+  if (/^[-+]?\d{16,}$/.test(t)) return { e: [T_STR, input, style] }
   // a number too large to be one (1e999) stays the text typed: the file has no way to say Infinity
   if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) && Number.isFinite(Number(t))) {
     const n = Number(t)
@@ -187,6 +246,8 @@ function parseInput(input: string, style: number, ctx: InputContext = { fmt: '',
     return { e: [T_NUM, Number(t.slice(0, -1)) / 100, style], want: general ? (dec ? `0.${'0'.repeat(Math.min(dec, 10))}%` : '0%') : undefined }
   }
   if (/^(true|false)$/i.test(t)) return { e: [T_BOOL, /^true$/i.test(t) ? 1 : 0, style] }
+  const amount = amountInput(t)
+  if (amount) return { e: [T_NUM, amount.n, style], want: general ? amount.fmt : undefined }
   if (general || isDateFormat(ctx.fmt)) {
     const date = dateInput(t, ctx.date1904)
     if (date) return { e: [T_NUM, date.serial, style], want: general ? date.fmt : undefined }
@@ -501,7 +562,9 @@ export class XlsxEditor {
       const key = r * MAX_COL + c
       const prev = getEntry(d, r, c)
       const st = prev?.[2] ?? 0
-      const { e, f, want } = parseInput(input, st, { fmt: xfs[st]?.numFmt ?? '', date1904: this.wb.date1904 })
+      const { e, f, want: typed } = parseInput(input, st, { fmt: xfs[st]?.numFmt ?? '', date1904: this.wb.date1904 })
+      // a formula typed into a cell without a format shows as what it computes: a date, or as the cell it is
+      const want = typed ?? (e && f && !/[^\s]/.test((xfs[st]?.numFmt ?? '').replace(/^general$/i, '')) ? this.formulaFormat(sheet, f) : undefined)
       if (e && want) e[2] = (ed ??= await this.styles()).derive(st, { numFmt: want })
       if (e && e[0] === T_STR && !f && input.includes('\n')) {
         if (!xfs[st]?.wrap) e[2] = (ed ??= await this.styles()).derive(st, { wrap: true })
@@ -524,6 +587,54 @@ export class XlsxEditor {
     const res = this.record(sheet, changes, range, rowsBefore && { before: { rowAttrs: rowsBefore }, after: { rowAttrs: layoutState(d).rowAttrs } })
     if (styles?.length) res.styles = styles
     return res
+  }
+
+  /**
+   * The number format a formula typed into a cell without one takes, as Excel gives it: a date for the functions
+   * that give one, the format of the cell it reads for "=A1", a date for a date moved by a number ("=A1+30").
+   * Undefined: none (the General format stays).
+   */
+  private formulaFormat(sheet: number, f: string): string | undefined {
+    let ast: Ast
+    try {
+      ast = parseFormula(f)
+    } catch {
+      return undefined
+    }
+    const xfs = this.wb.styles.xfs
+    const fmtOf = (ref: RefAddr): string => {
+      const i = ref.sheet === undefined ? sheet : this.wb.sheets.findIndex((s) => s.name.toLowerCase() === ref.sheet!.toLowerCase())
+      const d = this.wb.sheetsData.get(i)
+      const fmt = d ? (xfs[getEntry(d, ref.r0, ref.c0)?.[2] ?? 0]?.numFmt ?? '') : ''
+      return /^general$/i.test(fmt) ? '' : fmt
+    }
+    const cellFmt = (n: Ast): string => (n.type === 'ref' && n.ref.kind === 'cell' ? fmtOf(n.ref) : '')
+    const dateOf = (n: Ast): string => {
+      const fmt = cellFmt(n)
+      return fmt && isDateFormat(fmt) ? fmt : ''
+    }
+    while (ast.type === 'unary' && ast.op === '+') ast = ast.arg
+    if (ast.type === 'ref') return cellFmt(ast) || undefined
+    if (ast.type === 'call') {
+      if (ast.name === 'NOW') return 'dd/mm/yyyy hh:mm'
+      if (ast.name === 'TIME' || ast.name === 'TIMEVALUE') return 'hh:mm:ss'
+      if (DATE_FUNCTIONS.has(ast.name)) return (ast.args[0] && dateOf(ast.args[0])) || 'dd/mm/yyyy'
+      if ((ast.name === 'MIN' || ast.name === 'MAX') && ast.args.length) {
+        // (the earliest / latest of some dates: the format of the first of them)
+        const a = ast.args[0].type === 'range' ? ast.args[0].left : ast.args[0]
+        const fmt = a.type === 'ref' && a.ref.kind === 'area' ? fmtOf(a.ref) : cellFmt(a)
+        return fmt && isDateFormat(fmt) ? fmt : undefined
+      }
+      return undefined
+    }
+    // a date and some days is a date; the days between two dates are a number
+    if (ast.type === 'binary' && (ast.op === '+' || ast.op === '-')) {
+      const l = dateOf(ast.left)
+      const r = dateOf(ast.right)
+      if (l && !r) return l
+      if (r && !l && ast.op === '+') return r
+    }
+    return undefined
   }
 
   /** the style table grew: stores it, re-derives its css and returns the entries added after the first `before` */
