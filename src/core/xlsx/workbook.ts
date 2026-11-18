@@ -4,12 +4,13 @@ import type { LoadReport, RowPages, SheetLoader } from './import'
 import { toCsv } from '../convert'
 import { parseTheme, type Theme } from '../theme'
 import { Calc } from './calc'
-import { kid, kids, num, parseXmlStream, type Attrs, type SaxHandler } from '../xml'
+import { kid, kids, parseXmlStream, type Attrs, type SaxHandler } from '../xml'
 import { formatValue, formatText } from './numfmt'
 import { parseSheetStyles, type SheetStyles } from './styles'
 import { expandShared, formulaAt } from './structure'
 import { stripFunctionPrefixes } from './formula'
 import type { Shift } from './follow'
+import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlInt, ooxmlNumber } from './limits'
 import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
 
 export const T_NUM = 0
@@ -20,9 +21,7 @@ export const T_ERR = 4
 export const T_DATE = 5
 export const T_EMPTY = 6
 
-export const MAX_COL = 16384
-/** rows a worksheet holds (Excel's limit): a sheet with more cannot be saved as a workbook */
-export const MAX_ROWS = 1_048_576
+export { MAX_COL, MAX_ROWS } from './limits'
 
 const decodeX = (s: string) => (s.indexOf('_x') >= 0 ? s.replace(/_x([0-9A-Fa-f]{4})_/g, (_, h: string) => String.fromCharCode(parseInt(h, 16))) : s)
 
@@ -59,6 +58,13 @@ export function parseRange(ref: string): Merge | undefined {
   const [r0, c0] = parseRef(a)
   const [r1, c1] = b ? parseRef(b) : [r0, c0]
   return { r0, c0, r1, c1 }
+}
+
+/** Validate file coordinates here, without restricting parseRef/parseRange used by CSV and editing. */
+function worksheetRef(ref: string): [number, number] | undefined {
+  if (!/^\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}$/.test(ref)) return undefined
+  const [r, c] = parseRef(ref.replace(/\$/g, ''))
+  return r < MAX_ROWS && c < MAX_COL ? [r, c] : undefined
 }
 
 export class SheetData {
@@ -137,8 +143,11 @@ class SheetHandler implements SaxHandler {
   open(name: string, a: Attrs): boolean | void {
     switch (name) {
       case 'c': {
+        if (!this.rowCells) return true
         const r = a.r
-        this.col = r ? parseRef(r)[1] : this.col + 1
+        const ref = r === undefined ? [this.row, this.col + 1] : worksheetRef(r)
+        if (!ref || ref[0] !== this.row || ref[1] >= MAX_COL) return true
+        this.col = ref[1]
         this.cType = a.t ?? ''
         this.cStyle = a.s ? Number(a.s) : 0
         this.val = ''
@@ -166,40 +175,49 @@ class SheetHandler implements SaxHandler {
         return true
       case 'row': {
         this.headerReady = true
-        this.row = a.r ? Number(a.r) - 1 : this.row + 1
+        const row = a.r === undefined ? this.row + 1 : (ooxmlInt(a.r, 1, MAX_ROWS) ?? 0) - 1
+        // Discard the whole record before sparse array lengths or progress counts can grow.
+        if (row < 0 || row >= MAX_ROWS) return true
+        this.row = row
         this.col = -1
         this.rowCells = []
         const hidden = a.hidden === '1' || a.hidden === 'true'
-        if (hidden || a.ht) this.d.rowAttrs.set(this.row, { ht: a.ht ? Number(a.ht) : undefined, hidden: hidden || undefined })
-        this.rowHasHt = hidden || !!a.ht
+        const ht = ooxmlNumber(a.ht, 0, MAX_ROW_HEIGHT_PT)
+        if (hidden || ht !== undefined) this.d.rowAttrs.set(this.row, { ht, hidden: hidden || undefined })
+        this.rowHasHt = hidden || ht !== undefined
         this.rowMaxPt = 0
         if (hidden) this.newSizes.push([this.row, 0])
-        else if (a.ht) {
-          const px = Math.round((Number(a.ht) * 4) / 3)
+        else if (ht !== undefined) {
+          const px = Math.round((ht * 4) / 3)
           if (px !== this.d.defaultRowH) this.newSizes.push([this.row, px])
         }
         return
       }
       case 'sheetFormatPr': {
-        const h = num(a.defaultRowHeight)
-        if (h) this.d.defaultRowH = Math.round((h * 4) / 3)
-        const w = num(a.defaultColWidth)
-        const base = num(a.baseColWidth)
-        if (w) this.d.defaultColW = Math.round(w * 7)
+        const h = ooxmlNumber(a.defaultRowHeight, 0, MAX_ROW_HEIGHT_PT)
+        if (h) this.d.defaultRowH = Math.max(1, Math.round((h * 4) / 3))
+        const w = ooxmlNumber(a.defaultColWidth, 0, MAX_COL_WIDTH)
+        const base = ooxmlInt(a.baseColWidth, 0, MAX_COL_WIDTH)
+        if (w) this.d.defaultColW = Math.max(1, Math.round(w * 7))
         else if (base !== undefined) this.d.defaultColW = Math.round(base * 7 + 8)
         return
       }
       case 'col': {
-        const min = Number(a.min) - 1
-        const max = Math.min(Number(a.max) - 1, MAX_COL - 1)
+        const first = ooxmlInt(a.min, 1, MAX_COL)
+        const last = ooxmlInt(a.max, 1, MAX_COL)
+        if (first === undefined || last === undefined || first > last) return
+        const min = first - 1
+        const max = last - 1
         const hidden = a.hidden === '1' || a.hidden === 'true'
-        const w = hidden ? 0 : a.width ? Math.round(Number(a.width) * 7) : this.d.defaultColW
+        const width = ooxmlNumber(a.width, 0, MAX_COL_WIDTH)
+        if (a.width !== undefined && width === undefined) return
+        const w = hidden ? 0 : width !== undefined ? Math.round(width * 7) : this.d.defaultColW
         this.d.colInfo.push({ min, max, w })
         return
       }
       case 'pane':
         if (a.state === 'frozen' || a.state === 'frozenSplit') {
-          this.d.frozen = { rows: Math.round(num(a.ySplit, 0)!), cols: Math.round(num(a.xSplit, 0)!) }
+          this.d.frozen = { rows: ooxmlInt(a.ySplit, 0, MAX_ROWS - 1) ?? 0, cols: ooxmlInt(a.xSplit, 0, MAX_COL - 1) ?? 0 }
         }
         return
       case 'sheetView':
@@ -209,8 +227,12 @@ class SheetHandler implements SaxHandler {
         this.headerReady = true
         return
       case 'mergeCell': {
-        const m = a.ref ? parseRange(a.ref) : undefined
-        if (m) this.d.merges.push(m)
+        const parts = a.ref?.split(':') ?? []
+        const start = worksheetRef(parts[0] ?? '')
+        const end = parts.length === 1 ? start : worksheetRef(parts[1] ?? '')
+        if (parts.length <= 2 && start && end && start[0] <= end[0] && start[1] <= end[1]) {
+          this.d.merges.push({ r0: start[0], c0: start[1], r1: end[0], c1: end[1] })
+        }
         return
       }
       case 'extLst':
@@ -296,7 +318,7 @@ class SheetHandler implements SaxHandler {
       }
       case 'row':
         if (!this.rowHasHt && this.rowMaxPt > this.basePt * 1.15) {
-          const px = Math.round(this.rowMaxPt * (4 / 3) * 1.3 + 3)
+          const px = Math.min(MAX_ROW_HEIGHT_PT * (4 / 3), Math.round(this.rowMaxPt * (4 / 3) * 1.3 + 3))
           if (px > this.d.defaultRowH) {
             this.newSizes.push([this.row, px])
             this.d.autoRowH.set(this.row, px)
