@@ -491,7 +491,8 @@ export function SizeBox(props: { value?: number; placeholder?: number; sizes?: n
           e.currentTarget.select()
           setOpen(true)
         }}
-        onChange={(e) => setText(e.target.value.replace(/[^\d.]/g, ''))}
+        // a decimal comma is a decimal point (12,5 is not 125)
+        onChange={(e) => setText(e.target.value.replace(/,/g, '.').replace(/[^\d.]/g, '').replace(/^(\d*\.\d*)\..*$/, '$1'))}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault()
