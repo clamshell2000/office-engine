@@ -36,6 +36,12 @@ export interface OpenResult {
    * (odt, ods, odp); saving writes the Office Open XML file (docx, xlsx, pptx)
    */
   converted?: LegacyFormat
+  /**
+   * The file is not the plain document of its kind but a variant: with macros (docm, xlsm, pptm), a template (dotx,
+   * xltx, potx and their macro forms), a slide show (ppsx, ppsm). Saving keeps it that: this is the extension of the
+   * saved file (the macros, which the engine does not read, are kept in it).
+   */
+  ext?: string
   xlsx?: WorkbookMeta
   pptx?: PresentationMeta
 }

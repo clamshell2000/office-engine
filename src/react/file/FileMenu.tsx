@@ -38,6 +38,8 @@ export interface FileMenuItem {
 
 export interface FileActionsOptions {
   kind: DocKind | undefined
+  /** extension of the Office file when it is not the plain one of its kind (".xlsm", ".dotx"…) */
+  ext?: string
   /** file name without extension */
   base: string
   /** New / Open (replace the document) */
@@ -101,7 +103,7 @@ export function useFileActions(o: FileActionsOptions): FileActions {
   section(fileItems)
   if (o.canDownload && kind) {
     section([
-      { value: 'original', label: KIND_LABEL[kind], icon: 'save', hint: EXT[kind], head: 'Download as' },
+      { value: 'original', label: KIND_LABEL[kind], icon: 'save', hint: o.ext || EXT[kind], head: 'Download as' },
       { value: 'pdf', label: 'PDF document', icon: 'pdf', hint: '.pdf' },
       ...(o.picture
         ? [{ value: 'picture', label: o.picture.label, icon: 'image', hint: o.picture.ext } as const]

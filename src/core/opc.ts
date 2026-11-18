@@ -136,7 +136,17 @@ export class OpcPackage {
     if (/\[content_types\]\.xml$/i.test(path)) this.contentTypes = undefined
   }
 
-  /** Builds the edited package; unchanged entries are copied without recompression. */
+  /**
+   * The format of the package as its main part declares it: a workbook with macros is an .xlsm, a template an .xltx…
+   * A file named or typed otherwise is one Excel / Word / PowerPoint refuse to open. Undefined for a plain document.
+   */
+  async flavor(): Promise<{ ext: string; mime: string } | undefined> {
+    const main = await this.mainPart().catch(() => undefined)
+    const f = main && FLAVORS[(await this.contentType(main.path)) ?? '']
+    return f ? { ext: f[0], mime: f[1] } : undefined
+  }
+
+  /** Builds the edited package; unchanged entries are copied without recompression. `type`: of a plain document of its kind. */
   async save(type: string): Promise<Blob> {
     const m = new Map<string, PartData | null>()
     for (const { path, data } of this.changes.values()) m.set(path, data)
@@ -149,6 +159,7 @@ export class OpcPackage {
     const nodes = this.has(rp)
       ? parseRaw(await this.text(rp))
       : parseRaw('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
+    type = (await this.flavor())?.mime ?? type
     const root = rootEl(nodes)!
     const ids = new Set(kidsOf(root, 'Relationship').map((r) => getAttr(r, 'Id')))
     let n = ids.size + 1
@@ -287,3 +298,18 @@ export function relsOfType(rels: Rels, suffix: string): Rel[] {
 }
 
 const SKIP_EXT = new Set(['extLst'])
+/** the formats other than the plain document (docx, xlsx, pptx), by the content type of the main part: extension, media type */
+const FLAVORS: Record<string, [string, string]> = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml': ['dotx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.template'],
+  'application/vnd.ms-word.document.macroEnabled.main+xml': ['docm', 'application/vnd.ms-word.document.macroEnabled.12'],
+  'application/vnd.ms-word.template.macroEnabledTemplate.main+xml': ['dotm', 'application/vnd.ms-word.template.macroEnabled.12'],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml': ['xltx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.template'],
+  'application/vnd.ms-excel.sheet.macroEnabled.main+xml': ['xlsm', 'application/vnd.ms-excel.sheet.macroEnabled.12'],
+  'application/vnd.ms-excel.template.macroEnabled.main+xml': ['xltm', 'application/vnd.ms-excel.template.macroEnabled.12'],
+  'application/vnd.openxmlformats-officedocument.presentationml.template.main+xml': ['potx', 'application/vnd.openxmlformats-officedocument.presentationml.template'],
+  'application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml': ['ppsx', 'application/vnd.openxmlformats-officedocument.presentationml.slideshow'],
+  'application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml': ['pptm', 'application/vnd.ms-powerpoint.presentation.macroEnabled.12'],
+  'application/vnd.ms-powerpoint.template.macroEnabled.main+xml': ['potm', 'application/vnd.ms-powerpoint.template.macroEnabled.12'],
+  'application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml': ['ppsm', 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12'],
+}
+

@@ -330,9 +330,11 @@ export function DocViewer(props: DocViewerProps) {
     [onDirtyChange],
   )
   const baseName = (renamed ?? (client?.name || docName || 'document')).replace(/\.[^.]+$/, '')
-  const fileName = baseName + (client ? EXT[client.kind] : '')
+  // the Office file as it is saved: a workbook with macros stays an .xlsm, a template an .xltx (named otherwise, Excel refuses it)
+  const officeExt = client ? (client.info?.ext ? `.${client.info.ext}` : EXT[client.kind]) : ''
+  const fileName = baseName + officeExt
   // what Save writes: the Office file, or a Markdown / HTML / SVG file in its own format
-  const saveExt = saveFormat ? `.${PLAIN_FILE[saveFormat].ext}` : client ? EXT[client.kind] : ''
+  const saveExt = saveFormat ? `.${PLAIN_FILE[saveFormat].ext}` : officeExt
   const saveName = baseName + saveExt
   /** the text of a file saved in its own format: the source as edited, or built from the edited document */
   const sourceText = useCallback(async (): Promise<string> => {
@@ -471,6 +473,7 @@ export function DocViewer(props: DocViewerProps) {
   const canOpen = fileMenu && allowOpen && !props.collab
   const fileActions = useFileActions({
     kind: client?.kind,
+    ext: officeExt,
     base: baseName,
     canOpen,
     canImport: fileMenu && allowEdit && canEdit,
@@ -684,9 +687,9 @@ export function DocViewer(props: DocViewerProps) {
             initial: baseName,
             ok: 'Rename',
             onOk: (v) => {
-              const next = v.trim().replace(/[\\/:*?"<>|]+/g, ' ').replace(new RegExp(`(\\${EXT[client.kind]}|\\${saveExt})$`, 'i'), '')
+              const next = v.trim().replace(/[\\/:*?"<>|]+/g, ' ').replace(new RegExp(`(\\${officeExt}|\\${saveExt})$`, 'i'), '')
               if (!next) return
-              setRenamed(next + EXT[client.kind])
+              setRenamed(next + officeExt)
               props.onRename?.(next + saveExt)
             },
           }}

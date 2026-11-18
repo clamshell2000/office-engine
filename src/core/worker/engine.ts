@@ -91,7 +91,11 @@ export class Engine {
     const pkg = (this.pkg = new OpcPackage(zip))
     const main = await pkg.mainPart()
     this.kind = main.kind
-    const res: OpenResult = { kind: main.kind, name, size, ...(from ? { from } : {}), ...(imported ? { imported } : {}), ...(converted ? { converted: converted.format } : {}) }
+    const flavor = await pkg.flavor()
+    const res: OpenResult = {
+      kind: main.kind, name, size, ...(from ? { from } : {}), ...(imported ? { imported } : {}), ...(converted ? { converted: converted.format } : {}),
+      ...(flavor ? { ext: flavor.ext } : {}),
+    }
     if (main.kind === 'docx') this.docx = await DocxDocument.open(pkg, main.path)
     else if (main.kind === 'xlsx') {
       const wb = (this.xlsx = await XlsxWorkbook.open(pkg, main.path))
