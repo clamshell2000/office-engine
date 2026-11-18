@@ -1,3 +1,4 @@
+import { decodeXml } from './xml'
 import type { ByteSource } from './source'
 
 export interface ZipEntry {
@@ -251,7 +252,7 @@ export class ZipArchive {
   }
 
   async text(path: string): Promise<string> {
-    return new TextDecoder().decode(await this.bytes(path))
+    return decodeXml(await this.bytes(path))
   }
 }
 

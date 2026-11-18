@@ -1,7 +1,7 @@
 import { el, getAttr, isNode, kidsOf, parseRaw, rootEl, serialize } from './raw'
 import { normalize, ZipArchive } from './zip'
 import { rebuildZip, type PartData } from './zipwrite'
-import { kids, parseXml, type XEl } from './xml'
+import { decodeXml, kids, parseXml, utf8Declaration, type XEl } from './xml'
 import { dict } from './dict'
 
 export type DocKind = 'docx' | 'xlsx' | 'pptx'
@@ -113,7 +113,7 @@ export class OpcPackage {
     if (ch) {
       if (ch.data === null) throw new Error(`Missing part: ${path}`)
       if (typeof ch.data === 'string') return ch.data
-      if (ch.data instanceof Uint8Array) return new TextDecoder().decode(ch.data)
+      if (ch.data instanceof Uint8Array) return decodeXml(ch.data)
       throw new Error(`Part ${path} is a stream`)
     }
     return this.zip.text(path)
@@ -161,7 +161,7 @@ export class OpcPackage {
   async save(type: string): Promise<Blob> {
     type = (await this.flavor())?.mime ?? type
     const m = new Map<string, PartData | null>()
-    for (const { path, data } of this.changes.values()) m.set(path, data)
+    for (const { path, data } of this.changes.values()) m.set(path, typeof data === 'string' ? utf8Declaration(data) : data)
     return rebuildZip(this.zip, m, type)
   }
 
