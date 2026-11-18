@@ -1,8 +1,9 @@
 import { extOf, PLAIN_EXT, plainFormat, unpackedName } from '../../core/plain'
 import { LEGACY_EXT, legacyFormatOf } from '../../core/legacy'
+import { VISIO_EXT } from '../../core/visio'
 
-// .pages / .key / .numbers (Apple iWork) open as read-only Word / PowerPoint / Excel files
-const OFFICE = new Set(['docx', 'dotx', 'xlsx', 'xltx', 'pptx', 'potx', 'pages', 'key', 'numbers'])
+// .pages / .key / .numbers (Apple iWork) open as read-only Word / PowerPoint / Excel files, Visio drawings as read-only presentations
+const OFFICE = new Set(['docx', 'dotx', 'xlsx', 'xltx', 'pptx', 'potx', 'pages', 'key', 'numbers', ...VISIO_EXT])
 
 /** `accept` of the File → Open picker */
 export const OPEN_ACCEPT = [...OFFICE, ...Object.keys(LEGACY_EXT), ...Object.keys(PLAIN_EXT), 'gz'].map((e) => '.' + e).join(',')
@@ -17,7 +18,7 @@ export interface Imported {
 }
 
 /**
- * Office and iWork (Pages, Keynote, Numbers) files open as they are; Word / Excel / PowerPoint 97-2003, RTF and
+ * Office, iWork (Pages, Keynote, Numbers) and Visio files open as they are; Word / Excel / PowerPoint 97-2003, RTF and
  * OpenDocument files are converted to Office Open XML; CSV / TSV become a workbook, text / Markdown / HTML, SVG and
  * Mermaid / PlantUML / Graphviz diagrams a document, also gzip-compressed (.svgz, .csv.gz).
  */
@@ -34,6 +35,6 @@ export async function importFile(file: File): Promise<Imported> {
   // no / unknown extension: an Office package is a ZIP
   if (head[0] === 0x50 && head[1] === 0x4b) return { src: file, name: file.name, converted: false }
   throw new Error(
-    `Cannot open “${file.name}”: supported files are Word, Excel, PowerPoint (also 97-2003), OpenDocument, RTF, Pages, Keynote, Numbers, CSV, text, Markdown, HTML, SVG, Mermaid, PlantUML and Graphviz (also gzip-compressed: .svgz, .csv.gz)`,
+    `Cannot open “${file.name}”: supported files are Word, Excel, PowerPoint (also 97-2003), OpenDocument, RTF, Pages, Keynote, Numbers, Visio, CSV, text, Markdown, HTML, SVG, Mermaid, PlantUML and Graphviz (also gzip-compressed: .svgz, .csv.gz)`,
   )
 }

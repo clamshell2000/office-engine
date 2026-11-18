@@ -88,6 +88,7 @@ export async function convertCfb(bytes: Uint8Array): Promise<Converted> {
   if (cfb.has('Workbook') || cfb.has('Book')) return { file: await xlsToXlsx(cfb), format: 'xls' }
   if (cfb.has('PowerPoint Document')) return { file: await pptToPptx(cfb), format: 'ppt' }
   if (cfb.has('PP40')) throw new Error('PowerPoint 95 and older presentations are not supported')
+  if (cfb.has('VisioDocument')) throw new Error('Visio 2003-2010 drawings (.vsd) are not supported: save the drawing as .vsdx')
   throw new Error('Not a Word, Excel or PowerPoint file (an OLE compound file without a document stream)')
 }
 

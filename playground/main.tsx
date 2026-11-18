@@ -11,6 +11,7 @@ const SAMPLES = [
   { label: 'sample.pages', url: 'samples/sample.pages' },
   { label: 'sample.key', url: 'samples/sample.key' },
   { label: 'sample.numbers', url: 'samples/sample.numbers' },
+  { label: 'sample.vsdx', url: 'samples/sample.vsdx' },
   { label: 'sample.doc', url: 'samples/sample.doc' },
   { label: 'sample.xls', url: 'samples/sample.xls' },
   { label: 'sample.ppt', url: 'samples/sample.ppt' },
@@ -218,7 +219,7 @@ function App() {
         <DocViewer src={src} onLoad={onLoad} editable collab={collab} theme={theme} />
         {drag && (
           <div style={{ position: 'absolute', inset: 12, border: `2px dashed ${c.accent}`, borderRadius: 12, background: 'rgba(26,115,232,.06)', display: 'grid', placeItems: 'center', fontSize: 16, color: c.accent, pointerEvents: 'none' }}>
-            Drop an Office, Pages, Keynote, Numbers, CSV, text, Markdown, HTML, Mermaid, PlantUML or Graphviz file
+            Drop an Office, Pages, Keynote, Numbers, Visio, CSV, text, Markdown, HTML, Mermaid, PlantUML or Graphviz file
           </div>
         )}
       </div>

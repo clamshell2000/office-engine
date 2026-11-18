@@ -96,6 +96,32 @@ Cell values in Pages and Keynote tables use the same formats.
 
 **Not supported**: password-protected files and the iWork '09 and older XML format: each gives an error saying so.
 
+### Microsoft Visio (view only)
+
+Visio drawings open read-only: the worker converts a `.vsdx` file to PPTX in memory, a slide per page, and the presentation view shows it (thumbnails of the pages, zoom, slideshow, print, *Download as* **PowerPoint**). The bar shows a `VISIO` badge and no Edit button, even with `editable`. Macro-enabled drawings (`.vsdm`) and templates (`.vstx`, `.vstm`) open the same way; a stencil (`.vssx`, `.vssm`) shows each of its masters as a slide. The package is told by its content, whatever its name.
+
+Each shape is drawn where it is on its page: its geometry becomes a custom path already turned, flipped and placed (so a drawing of nested, rotated groups needs no frames of its own), its text a text box over it, its picture a picture. Text is laid out by the browser in the shape's text block, and can be selected and copied.
+
+| Part of the drawing | Converted                                                                                                                                            |
+|---------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ShapeSheet          | cells inherited from the master's shape, then from the line, fill and text styles and their parents; rows and sections a shape overrides or deletes  |
+| Geometry            | `MoveTo`, `LineTo`, `ArcTo`, `EllipticalArcTo`, `Ellipse`, `RelCubBezTo`, `RelQuadBezTo`, `PolylineTo`, `NURBSTo`, splines, the relative row types   |
+| Geometry sections   | several per shape, filled together (holes), `NoFill` / `NoLine` / `NoShow`, rounded corners (`Rounding`)                                             |
+| Placement           | pin, size, angle, flips, through any depth of groups; 1-D shapes (lines, connectors) along their line                                                |
+| Masters             | instances with their own size, colors and text; members of an instance, listed or not                                                                |
+| Fill                | solid, transparency, gradient stops and angle, the gradient patterns of older drawings, hatches (as a mixed color)                                   |
+| Line                | color, weight, transparency, dash patterns, line ends (begin / end, three sizes)                                                                     |
+| Themes              | themed fills, lines, fonts and text colors: scheme and variation colors put through the theme's styles, connector styles, readable text over a fill  |
+| Text                | the text block (place, size, angle, margins, vertical alignment), character rows (font, size, color, bold, italic, underline, strikethrough, case,   |
+|                     | super / subscript), paragraph rows (alignment, indents, spacing, bullets), fields (their shown value), line breaks, a background behind the text     |
+| Pictures            | PNG / JPEG / GIF / BMP / SVG, cropped to the part the shape shows, turned and flipped                                                                |
+| Pages               | page size and drawing scale, background pages under the pages that use them, layers that are hidden, a group's own drawing behind or in front        |
+
+- **Page sizes**: a presentation has one slide size, so it is the largest page's; a smaller page is drawn as a sheet at the center of its slide. A page over PowerPoint's 56 in is scaled down, text and line weights with it
+- **Not yet**: EMF / WMF pictures (the icons of many network stencils: a labeled box), shadows, line caps and compound lines, exact line end shapes (drawn as triangles, with PowerPoint's kinds in the saved file), tabs, text along a vertical direction, hyperlinks, shape data and comments, connectors routed again (they are drawn as saved), formulas (cells hold the values Visio computed)
+- **Not supported**: Visio 2003-2010 binary drawings (`.vsd`), which give an error saying to save the drawing as `.vsdx`
+- **Limits**: a drawing of more than 400,000 shapes (counting each member of every master instance), or of more than 256 MB of slide content, is refused
+
 ### CSV, text, Markdown, HTML and SVG
 
 A `src` (file, Blob, buffer or URL) that is not an Office package opens too, converted in the worker and **editable**:

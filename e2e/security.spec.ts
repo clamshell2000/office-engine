@@ -3,7 +3,7 @@
  * browser request nothing, and a link that would run script is not opened.
  */
 import { describe, expect, test } from 'bun:test'
-import { PROBE_HOST, probeDocx, probePptx, probeXlsx, scriptLinkDocx } from '../test/probes'
+import { PROBE_HOST, probeDocx, probePptx, probeVisio, probeXlsx, scriptLinkDocx } from '../test/probes'
 import { READY, useBrowser, viewer, type Viewer } from './harness'
 
 useBrowser()
@@ -55,6 +55,8 @@ describe('a crafted file', () => {
     ['pptx', probePptx, 'samples/sample.docx'],
     ['xlsx', probeXlsx, 'samples/sample.docx'],
     ['docx', probeDocx, 'samples/sample.xlsx'],
+    // a Visio drawing is shown as slides
+    ['vsdx', probeVisio, 'samples/sample.docx'],
   ] as const
 
   for (const [kind, build, start] of cases) {
@@ -62,16 +64,16 @@ describe('a crafted file', () => {
       const v = await viewer({ src: start })
       const requests = await outbound(v)
       await openBytes(v, `probe.${kind}`, await build())
-      await v.page.locator(READY[kind]).first().waitFor()
+      await v.page.locator(READY[kind === 'vsdx' ? 'pptx' : kind]).first().waitFor()
       // the probes are shown: text of the crafted shapes / the text box, the sheet's cells
-      if (kind === 'pptx') await v.page.getByText('probe 1').first().waitFor()
+      if (kind === 'pptx' || kind === 'vsdx') await v.page.getByText('probe 1').first().waitFor()
       if (kind === 'docx') await v.page.getByText('probe box').first().waitFor()
       if (kind === 'xlsx') await v.page.locator('.de-cell').first().waitFor()
       await v.page.waitForTimeout(1200)
       expect(await loadedUrls(v)).toEqual([])
 
-      // editing draws the same content again (and the toolbar shows the selection's colors)
-      await v.edit()
+      // editing draws the same content again (and the toolbar shows the selection's colors); a drawing is view only
+      if (kind !== 'vsdx') await v.edit()
       // a cell with the crafted fill, font color and border: the toolbar shows them
       if (kind === 'xlsx') await v.clickCell('A3')
       if (kind === 'pptx') await v.page.getByText('probe 1').first().click()

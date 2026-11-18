@@ -30,12 +30,13 @@ export const PLAIN_EXT: Record<string, PlainFormat> = dict({
   ...DIAGRAM_EXT,
 })
 
-/** packages (Office, iWork, OpenDocument), the legacy binary formats and RTF: never read as text */
+/** packages (Office, iWork, OpenDocument, Visio), the legacy binary formats and RTF: never read as text */
 const PACKAGE_EXT = new Set([
   'docx', 'dotx', 'docm', 'dotm', 'xlsx', 'xltx', 'xlsm', 'xltm', 'pptx', 'potx', 'pptm', 'potm', 'ppsx', 'ppsm',
   // (.dot is also Graphviz: a Word 97 template is told apart by its bytes)
   'pages', 'key', 'numbers', 'doc', 'xls', 'xlt', 'ppt', 'pot', 'pps', 'rtf',
   'odt', 'ott', 'fodt', 'ods', 'ots', 'fods', 'odp', 'otp', 'fodp',
+  'vsdx', 'vsdm', 'vstx', 'vstm', 'vssx', 'vssm',
 ])
 
 const MIME: Record<string, PlainFormat> = dict({

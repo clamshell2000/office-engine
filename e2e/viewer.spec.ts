@@ -86,6 +86,47 @@ describe('viewing', () => {
     expect(v.errors).toEqual([])
   })
 
+  test('visio: pages as slides, read-only, shapes and text drawn, downloads as PowerPoint; File → Open takes a drawing', async () => {
+    const v = await viewer({ src: 'samples/sample.vsdx', editable: true })
+    const { page } = v
+    expect(await v.title()).toBe('sample.vsdx')
+    expect(await page.locator('.de-badge').innerText()).toBe('VISIO')
+    expect(await v.barButton('Edit').count()).toBe(0)
+    expect(await page.locator('.de-ebar').count()).toBe(0)
+    // the background page is under both pages, not a slide of its own
+    await page.waitForFunction(() => /Slide 1 of 2/.test(document.querySelector('.de-bar')?.textContent ?? ''))
+    expect(await page.locator('.de-thumb').count()).toBe(2)
+    const first = page.locator('.de-slide-inner').first()
+    const text = await first.innerText()
+    for (const t of ['Order handling', 'Receive order', 'In stock?', 'Pick, pack and ship', 'yes', 'no']) expect(text).toContain(t)
+    // every shape is a path: the masters' fills are painted, the connectors end in line ends
+    expect(await first.locator('svg path[fill="#dbeafe"]').count()).toBe(3)
+    expect(await first.locator('svg path[marker-end]').count()).toBe(7)
+    // a label sits on its connector: its middle is on the line
+    const label = (await first.getByText('yes', { exact: true }).boundingBox())!
+    const link = (await first.locator('svg path[marker-end]').nth(2).boundingBox())!
+    expect(Math.abs(label.y + label.height / 2 - (link.y + link.height / 2))).toBeLessThan(3)
+    expect(label.x).toBeGreaterThan(link.x)
+    expect(label.x + label.width).toBeLessThan(link.x + link.width)
+
+    await page.locator('.de-thumb').nth(1).click()
+    await page.waitForFunction(() => /Slide 2 of 2/.test(document.querySelector('.de-bar')?.textContent ?? ''))
+    const second = page.locator('.de-slide-inner').nth(1)
+    expect(await second.innerText()).toContain('Masters, groups and themes are followed')
+    expect(await second.innerText()).not.toContain('Hidden layer')
+    expect(await second.locator('img').count()).toBe(1)
+
+    const dl = await v.downloadAs('PowerPoint presentation')
+    expect(dl.name).toBe('sample.pptx')
+    expect(dl.bytes.subarray(0, 2).toString()).toBe('PK')
+
+    // opened from the File menu, like any other file
+    await v.chooseFile(() => v.menu('Open…'), `${import.meta.dir}/../playground/public/samples/sample.vsdx`)
+    await page.waitForFunction(() => /Slide 1 of 2/.test(document.querySelector('.de-bar')?.textContent ?? ''))
+    expect(await page.locator('.de-badge').innerText()).toBe('VISIO')
+    expect(v.errors).toEqual([])
+  })
+
   test('numbers: tables as sheets, read-only, downloads as Excel', async () => {
     const v = await viewer({ src: 'samples/sample.numbers', editable: true })
     const { page } = v

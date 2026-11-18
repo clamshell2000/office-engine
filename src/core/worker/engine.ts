@@ -14,6 +14,7 @@ import type { PParaSpec, ShapeOp, SlideOp } from '../pptx/types'
 import { addSlideImage, shapeOps, slideOp, undoShapes } from '../pptx/edit'
 import { ZipArchive } from '../zip'
 import { isIworkZip, isLegacyIwork, openIwork } from '../iwork'
+import { isVisioZip, openVisio } from '../visio'
 import { convertBiff, convertCfb, convertFlatOdf, convertOdfZip, convertRtf, LEGACY_EXT, legacyFormatOf, type Converted } from '../legacy'
 import { XlsxCollabWorker } from '../../collab/xlsx-worker'
 import type { XOp } from '../../collab/xlsx-ops'
@@ -85,6 +86,8 @@ export class Engine {
     // Apple Pages / Keynote / Numbers: converted to a Word document / PowerPoint presentation / Excel workbook, shown read-only
     if (isIworkZip(zip)) ({ zip, from } = await openIwork(zip))
     else if (isLegacyIwork(zip)) throw new Error('iWork ’09 (and older) Pages, Keynote and Numbers files are not supported')
+    // Microsoft Visio drawings: converted to a PowerPoint presentation (a slide per page), shown read-only
+    else if (isVisioZip(zip)) ({ zip, from } = await openVisio(zip))
     const pkg = (this.pkg = new OpcPackage(zip))
     const main = await pkg.mainPart()
     this.kind = main.kind

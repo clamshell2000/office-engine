@@ -30,7 +30,8 @@ import { COMMENT_KEYS, CommentsPanel } from './comments/CommentsPanel'
 export interface DocViewerProps {
   /**
    * File, Blob, ArrayBuffer, Uint8Array or URL (HTTP Range requests are used when the server supports them): an Office file,
-   * an Apple Pages / Keynote / Numbers file (view only), CSV / TSV / text / Markdown / HTML (opened as a workbook / document),
+   * an Apple Pages / Keynote / Numbers file or a Microsoft Visio drawing (view only), CSV / TSV / text / Markdown / HTML (opened as a
+   * workbook / document),
    * an SVG picture or a Mermaid / PlantUML / Graphviz diagram.
    */
   src: DocSource | null | undefined
@@ -78,7 +79,7 @@ export interface DocViewerProps {
   allowDownload?: boolean
   /** Show the File menu (new, open, save, rename, download as PDF / HTML / text…, details, print) and its shortcuts. Default true. */
   fileMenu?: boolean
-  /** File → New / Open: replace the document with a blank one or a local file (Office, Pages, Keynote, Numbers, CSV, text, Markdown, HTML). Default true. */
+  /** File → New / Open: replace the document with a blank one or a local file (Office, Pages, Keynote, Numbers, Visio, CSV, text, Markdown, HTML). Default true. */
   allowOpen?: boolean
   /** Extra File menu entries (Share, Version history…), shown before Close. */
   fileMenuItems?: FileMenuItem[]
@@ -114,7 +115,12 @@ export interface DocViewerProps {
 }
 
 const EXT: Record<string, string> = { docx: '.docx', xlsx: '.xlsx', pptx: '.pptx' }
-const FROM_LABEL: Record<'pages' | 'keynote' | 'numbers', string> = { pages: 'Apple Pages document', keynote: 'Apple Keynote presentation', numbers: 'Apple Numbers spreadsheet' }
+const FROM_LABEL: Record<'pages' | 'keynote' | 'numbers' | 'visio', string> = {
+  pages: 'Apple Pages document',
+  keynote: 'Apple Keynote presentation',
+  numbers: 'Apple Numbers spreadsheet',
+  visio: 'Microsoft Visio drawing',
+}
 const CONVERTED_LABEL: Record<LegacyFormat, string> = {
   doc: 'Word 97-2003 document',
   xls: 'Excel 97-2003 workbook',
@@ -190,7 +196,7 @@ export function DocViewer(props: DocViewerProps) {
   const srcFormat = client?.info?.imported
   // an SVG file: the picture alone, read only (its text is edited in the source pane)
   const isPicture = srcFormat === 'svg'
-  // converted from another format (Apple Pages, Keynote, Numbers): view only
+  // converted from another format (Apple Pages, Keynote, Numbers, Microsoft Visio): view only
   const readOnly = !!client?.info?.from || isPicture
   // with collaboration, editing waits for the shared history (offline edits sync on reconnect)
   const canEdit = !readOnly && (!props.collab || collab.status === 'live' || collab.status === 'offline')

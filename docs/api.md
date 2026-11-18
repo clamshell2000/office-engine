@@ -50,7 +50,7 @@ CSS is auto-injected, no import needed (or import `@p10node/office-engine/styles
 
 | Prop               | Type                                           | Default   | Notes                                                                                                                    |
 |--------------------|------------------------------------------------|-----------|--------------------------------------------------------------------------------------------------------------------------|
-| `src`              | `File \| Blob \| ArrayBuffer \| string \| URL` | –         | Document: Office (also 97-2003); OpenDocument; RTF; Pages / Keynote / Numbers; CSV / TSV, text, Markdown, HTML, diagrams |
+| `src`              | `File \| Blob \| ArrayBuffer \| string \| URL` | –         | Office (also 97-2003); OpenDocument; RTF; Pages / Keynote / Numbers; Visio; CSV / TSV, text, Markdown, HTML, diagrams    |
 | `name`             | `string`                                       | auto      | Display name; its extension also tells the format of a `Blob` / `ArrayBuffer`                                            |
 | `toolbar`          | `boolean`                                      | `true`    | Top bar (name, status, progress)                                                                                         |
 | `toolbarExtra`     | `ReactNode`                                    | –         | Extra buttons on the right of the toolbar                                                                                |
@@ -62,7 +62,7 @@ CSS is auto-injected, no import needed (or import `@p10node/office-engine/styles
 | `styleTarget`      | `Document \| ShadowRoot`                       | document  | Where CSS is injected                                                                                                    |
 | `injectStyles`     | `boolean`                                      | `true`    | Inject the stylesheet; false when the page loads `@p10node/office-engine/styles.css` itself                              |
 | `theme`            | `'light' \| 'dark' \| 'auto' \| ThemeOptions`  | `'light'` | Color scheme of the chrome; `'auto'` follows `prefers-color-scheme`; an object adds token overrides ([Theming](theming.md)). Documents keep their own colors |
-| `editable`         | `boolean`                                      | `false`   | Open in edit mode (Pages, Keynote and Numbers files stay view only)                                                      |
+| `editable`         | `boolean`                                      | `false`   | Open in edit mode (Pages, Keynote, Numbers and Visio files stay view only)                                               |
 | `allowEdit`        | `boolean`                                      | `true`    | Show Edit/View button                                                                                                    |
 | `allowSave`        | `boolean`                                      | `true`    | Show Save/Download button, enable Ctrl+S                                                                                 |
 | `allowDownload`    | `boolean`                                      | `true`    | Allow downloads to device (save without `onSave`, images)                                                                |
@@ -208,7 +208,7 @@ import { DocumentClient } from '@p10node/office-engine/core'
 
 const doc = await DocumentClient.open(fileOrUrl, { onProgress: console.log })
 doc.kind                                   // 'docx' | 'xlsx' | 'pptx'
-doc.info.from                              // 'pages' / 'keynote' / 'numbers': an Apple file, converted to docx / pptx / xlsx (view only)
+doc.info.from                              // 'pages' / 'keynote' / 'numbers' / 'visio': an Apple or Visio file, converted to docx / pptx / xlsx / pptx (view only)
 doc.info.imported                          // 'csv' / 'tsv' / 'text' / 'markdown' / 'html' / 'svg' / 'mermaid' / 'plantuml' / 'graphviz': a plain file, built as xlsx / docx (editable)
 doc.info.converted                         // 'doc' / 'xls' / 'ppt' / 'rtf' / 'odt' / 'ods' / 'odp': converted to docx / xlsx / pptx (editable, saved as such)
 doc.on('docx:blocks', (blocks) => {})      // docx: streamed blocks
