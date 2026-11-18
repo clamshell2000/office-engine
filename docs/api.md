@@ -217,6 +217,7 @@ doc.kind                                   // 'docx' | 'xlsx' | 'pptx'
 doc.info.from                              // 'pages' / 'keynote' / 'numbers' / 'visio': an Apple or Visio file, converted to docx / pptx / xlsx / pptx (view only)
 doc.info.imported                          // 'csv' / 'tsv' / 'text' / 'markdown' / 'html' / 'svg' / 'mermaid' / 'plantuml' / 'graphviz': a plain file, built as xlsx / docx (editable)
 doc.info.converted                         // 'doc' / 'xls' / 'ppt' / 'rtf' / 'odt' / 'ods' / 'odp': converted to docx / xlsx / pptx (editable, saved as such)
+doc.info.ext                               // 'xlsm' / 'xltx' / 'docm' / 'dotx' / 'pptm' / 'potx' / 'ppsx' …: the file is that variant, and is saved as it (undefined: plain docx / xlsx / pptx)
 doc.on('docx:blocks', (blocks) => {})      // docx: streamed blocks
 await doc.call('docx.start')
 doc.call('xlsx.load', 0)                   // xlsx: stream sheet
@@ -224,6 +225,9 @@ doc.on('xlsx:progress', (p) => {})
 await doc.call('xlsx.block', 0, 1000, 1100) // formatted cells, rows [1000, 1100)
 await doc.call('pptx.slide', 12)           // slide model with layout/master/theme resolved
 await doc.call('xlsx.set', 0, [{ r: 4, c: 1, input: '=SUM(A1:A4)' }])
+const clip = await doc.call('xlsx.copy', 0, { r0: 0, c0: 0, r1: 9, c1: 2 })   // cells as they are (values, formats, formulas) + `text` for the clipboard
+await doc.call('xlsx.sheetOp', 0, { op: 'paste', range: { r0: 20, c0: 0, r1: 29, c1: 2 }, cells: clip.cells, from: { sheet: clip.sheet, r0: 0, c0: 0 } })
+await doc.call('xlsx.sheetOp', 0, { op: 'clear', range: { r0: 0, c0: 3, r1: 1048575, c1: 3 } })   // a whole column, every row of it
 await doc.call('xlsx.import', 0, csvFile, { name: 'cities' }) // a new sheet after sheet 0 with the rows of a CSV / TSV, streamed in when loaded
 await doc.call('xlsx.text', 0, ',') // the sheet as CSV (a Blob; '\t' for TSV), the values as shown
 // open(src, { residentCells: 12_000_000 }): cells of a CSV / TSV kept in memory; the other rows are read from the file as they are shown
