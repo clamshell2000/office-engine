@@ -30,6 +30,8 @@ export interface XfInfo {
   /** explicit horizontal alignment */
   hAlign?: string
   wrap: boolean
+  /** the cell is locked (the default): what a protected sheet refuses to change */
+  locked: boolean
 }
 
 export interface SheetStyles {
@@ -125,8 +127,9 @@ export function parseSheetStyles(root: XEl | undefined, theme: Theme): SheetStyl
       const rot = num(al.a.textRotation)
       if (rot) css.textRotate = rot === 255 ? 255 : rot > 90 ? 90 - rot : rot
     }
-    return { numFmt: numFmts.get(id) ?? BUILTIN_FORMATS[id] ?? 'General', fontPt: font?.sz ?? f0.sz ?? 11, css, hAlign, wrap }
+    const lock = kid(xf, 'protection')?.a.locked
+    return { numFmt: numFmts.get(id) ?? BUILTIN_FORMATS[id] ?? 'General', fontPt: font?.sz ?? f0.sz ?? 11, css, hAlign, wrap, locked: lock !== '0' && lock !== 'false' }
   })
-  if (!xfs.length) xfs.push({ numFmt: 'General', fontPt: f0.sz ?? 11, css: {}, wrap: false })
+  if (!xfs.length) xfs.push({ numFmt: 'General', fontPt: f0.sz ?? 11, css: {}, wrap: false, locked: true })
   return { xfs, baseFont }
 }

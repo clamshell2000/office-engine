@@ -25,6 +25,15 @@ export interface ColInfo {
   w: number
   /** width before hiding (px) */
   prevW?: number
+  /** attributes of the <col> the model does not edit (style, outlineLevel, collapsed, bestFit, phonetic), kept as read */
+  x?: Record<string, string>
+}
+
+/** what a <row> says that the sheet shows: height, hidden; `x`: the other attributes (s, customFormat, outlineLevel, collapsed, thickTop, thickBot), kept as read */
+export interface RowAttrs {
+  ht?: number
+  hidden?: boolean
+  x?: Record<string, string>
 }
 
 export interface Merge {
