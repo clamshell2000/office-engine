@@ -7,13 +7,13 @@ import { relOfType, relsPathFor } from '../opc'
 import type { DocComment } from '../comments'
 import { writeXlsxComments } from './comments'
 import {
-  clone, el, escText, relIdAttrs, getAttr, isNode, kidOf, kidsOf, local, parseRaw, prefixOf, rootEl, serialize, setAttr, setOrdered, textContent,
+  clone, el, escAttr, escText, relIdAttrs, getAttr, isNode, kidOf, kidsOf, local, parseRaw, prefixOf, rootEl, serialize, setAttr, setOrdered, textContent,
   type RChild, type RNode,
 } from '../raw'
 import { parseXml } from '../xml'
 import { BUILTIN_FORMATS, isDateFormat } from './numfmt'
 import { parseSheetStyles } from './styles'
-import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
+import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, RowAttrs, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
 import { expandShared, overflows, restore, setColWidth, setFormula, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
 import { dropSheetInFormula, moveRefsInFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type MoveOp } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
@@ -37,7 +37,7 @@ interface CellChange {
 interface LayoutState {
   merges?: Merge[]
   colInfo?: ColInfo[]
-  rowAttrs?: [number, { ht?: number; hidden?: boolean }][]
+  rowAttrs?: [number, RowAttrs][]
   frozen?: { rows: number; cols: number }
   gridLines?: boolean
 }
@@ -415,6 +415,116 @@ export class XlsxEditor {
     return before.length ? { before, after } : undefined
   }
 
+  /** a protected sheet refuses what `flag` of <sheetProtection> forbids (every flag used here is on unless the file says "0") */
+  private denySheet(d: SheetData, flag: string, what: string) {
+    const v = d.protection?.[flag]
+    if (d.protection && v !== '0' && v !== 'false') throw new Error(`This sheet is protected: ${what} is not allowed. Unprotect the sheet (in Excel) to change it.`)
+  }
+
+  /** style of the cell at (r, c) as the format of a cell with no content: its row's if it has one of its own, else its column's */
+  private lockStyleAt(d: SheetData, r: number, c: number): number {
+    const e = getEntry(d, r, c)
+    if (e) return e[2]
+    return this.defaultStyle(d, r, d.colInfo.find((ci) => ci.min <= c && c <= ci.max)?.x?.style)
+  }
+
+  private defaultStyle(d: SheetData, r: number, colStyle: string | undefined): number {
+    const x = d.rowAttrs.get(r)?.x
+    if (x && (x.customFormat === '1' || x.customFormat === 'true')) return Number(x.s ?? 0) || 0
+    return Number(colStyle ?? 0) || 0
+  }
+
+  /** a protected sheet refuses to change a locked cell of `range` (no cell in it is locked: the cell formats say so) */
+  private denyLocked(d: SheetData, range: Range | undefined, what = 'changing it') {
+    if (!d.protection || !range) return
+    const xfs = this.wb.styles.xfs
+    const locked = (st: number) => xfs[st]?.locked ?? true
+    const fail = () => {
+      throw new Error(`This sheet is protected and the cells ${what} include locked ones. Unprotect the sheet (in Excel) to change them.`)
+    }
+    if (range.r0 === range.r1 && range.c0 === range.c1) {
+      if (locked(this.lockStyleAt(d, range.r0, range.c0))) fail()
+      return
+    }
+    // columns in stretches of one format, each checked on the cells it has and on the ones it has not
+    const segs: [number, number, string | undefined][] = []
+    let at = range.c0
+    for (const ci of [...d.colInfo].sort((x, y) => x.min - y.min)) {
+      const lo = Math.max(ci.min, at)
+      const hi = Math.min(ci.max, range.c1)
+      if (hi < lo) continue
+      if (lo > at) segs.push([at, lo - 1, undefined])
+      segs.push([lo, hi, ci.x?.style])
+      at = hi + 1
+    }
+    if (at <= range.c1) segs.push([at, range.c1, undefined])
+    const last = Math.min(range.r1, d.rows.length - 1)
+    const plain = (r: number) => segs.some(([a, b, st]) => locked(this.defaultStyle(d, r, st)) && b >= a)
+    for (let r = range.r0; r <= last; r++) {
+      const row = d.rows[r]
+      const n = segs.map(() => 0)
+      if (row)
+        for (let k = 0; k < row.length; k += 4) {
+          const c = row[k] as number
+          if (c < range.c0 || c > range.c1) continue
+          if (locked(row[k + 3] as number)) fail()
+          const i = segs.findIndex(([a, b]) => a <= c && c <= b)
+          if (i >= 0) n[i]++
+        }
+      for (const [i, [a, b, st]] of segs.entries()) if (n[i] < b - a + 1 && locked(this.defaultStyle(d, r, st))) fail()
+    }
+    // the rows past the last one the sheet holds: their cells are empty (those with a format of their own apart)
+    if (range.r1 > last) {
+      const from = Math.max(range.r0, last + 1)
+      let formatted = 0
+      for (const r of d.rowAttrs.keys()) {
+        if (r < from || r > range.r1) continue
+        formatted++
+        if (plain(r)) fail()
+      }
+      if (range.r1 - from + 1 > formatted && segs.some(([a, b, st]) => b >= a && locked(this.defaultStyle(d, -1, st)))) fail()
+    }
+  }
+
+  /** what a protected sheet allows, for each operation on it */
+  private guardOp(d: SheetData, op: SheetOp) {
+    if (!d.protection) return
+    switch (op.op) {
+      case 'insertRows':
+        return this.denySheet(d, 'insertRows', 'inserting rows')
+      case 'insertCols':
+        return this.denySheet(d, 'insertColumns', 'inserting columns')
+      case 'deleteRows':
+        this.denySheet(d, 'deleteRows', 'deleting rows')
+        return this.denyLocked(d, { r0: op.at, r1: op.at + op.n - 1, c0: 0, c1: MAX_COL - 1 }, 'of the rows')
+      case 'deleteCols':
+        this.denySheet(d, 'deleteColumns', 'deleting columns')
+        return this.denyLocked(d, { r0: 0, r1: MAX_ROWS - 1, c0: op.at, c1: op.at + op.n - 1 }, 'of the columns')
+      case 'merge':
+      case 'unmerge':
+        this.denySheet(d, 'formatCells', op.op === 'merge' ? 'merging cells' : 'unmerging cells')
+        return op.op === 'merge' ? this.denyLocked(d, op.range) : undefined
+      case 'hideCols':
+      case 'colWidth':
+        return this.denySheet(d, 'formatColumns', 'changing columns')
+      case 'hideRows':
+      case 'rowHeight':
+        return this.denySheet(d, 'formatRows', 'changing rows')
+      case 'clear':
+        return this.denyLocked(d, op.range)
+      case 'fill':
+        return this.denyLocked(d, op.dir === 'down' ? { ...op.range, r0: op.range.r0 + 1 } : { ...op.range, c0: op.range.c0 + 1 })
+      case 'paste': {
+        const w = op.cells.reduce((m, row) => Math.max(m, row.length), 0)
+        if (!op.cells.length || !w) return
+        return this.denyLocked(d, { r0: op.range.r0, c0: op.range.c0, r1: Math.min(MAX_ROWS - 1, op.range.r0 + op.cells.length - 1), c1: Math.min(MAX_COL - 1, op.range.c0 + w - 1) })
+      }
+      case 'sort':
+        this.denySheet(d, 'sort', 'sorting')
+        return this.denyLocked(d, op.range)
+    }
+  }
+
   private sheet(i: number): SheetData {
     const d = this.wb.sheetsData.get(i)
     if (!d || !d.done) throw new Error('Sheet is still loading')
@@ -490,6 +600,7 @@ export class XlsxEditor {
   async setCells(sheet: number, inputs: CellInput[]): Promise<XlsxEditResult> {
     await this.ready()
     const d = this.sheet(sheet)
+    if (d.protection) for (const { r, c } of inputs) this.denyLocked(d, { r0: r, c0: c, r1: r, c1: c })
     await this.prepare(sheet, d, inputs)
     const changes: CellChange[] = []
     const range = { r0: Infinity, c0: Infinity, r1: -1, c1: -1 }
@@ -714,6 +825,7 @@ export class XlsxEditor {
   async sheetOp(sheet: number, op: SheetOp): Promise<XlsxEditResult> {
     await this.ready()
     const d = this.sheet(sheet)
+    this.guardOp(d, op)
     const name = this.wb.sheets[sheet].name
     const all: Range = { r0: 0, c0: 0, r1: Math.max(0, d.maxRow + 50), c1: Math.max(0, d.maxCol + 10) }
     const lay = (fn: () => void, range = all): XlsxEditResult => {
@@ -790,7 +902,7 @@ export class XlsxEditor {
             if (op.hidden) d.rowAttrs.set(r, { ...(cur ?? {}), hidden: true })
             else if (cur) {
               const { hidden: _h, ...rest } = cur
-              if (rest.ht !== undefined) d.rowAttrs.set(r, rest)
+              if (rest.ht !== undefined || rest.x) d.rowAttrs.set(r, rest)
               else d.rowAttrs.delete(r)
             }
             d.dirtyRows.add(r)
@@ -1100,6 +1212,7 @@ export class XlsxEditor {
   // ---------------------------------------------------------------- workbook (sheet list)
 
   async bookOp(op: BookOp): Promise<XlsxEditResult> {
+    if (this.wb.lockStructure) throw new Error('The structure of this workbook is locked (protected): sheets cannot be added, renamed, deleted or moved. Unprotect the workbook (in Excel) to change it.')
     await this.ready()
     const pkg = this.wb.pkg
     const nodes = parseRaw(await pkg.text(this.wb.mainPath))
@@ -1411,7 +1524,19 @@ function relist(root: RNode, listed: RNode[]) {
   }
 }
 
-function cellXml(d: SheetData, r: number, c: number, P: string, wb: XlsxWorkbook): string {
+/** attributes a rewritten <row> / <col> keeps from the file */
+function attrsXml(x: Record<string, string> | undefined): string {
+  let out = ''
+  if (x) for (const k in x) out += ` ${k}="${escAttr(x[k])}"`
+  return out
+}
+
+/** text as ST_Xstring (ECMA-376 §22.4.2.4): a literal _xHHHH_ is escaped, what XML cannot hold is written _xHHHH_ (reading decodes both) */
+function xText(s: string): string {
+  return s.replace(/_(?=x[0-9A-Fa-f]{4}_)/g, '_x005F_').replace(/[\u0000-\u0008\u000b-\u001f\uFFFE\uFFFF]/g, (ch) => `_x${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}_`)
+}
+
+function cellXml(d: SheetData, r: number, c: number, P: string, _wb: XlsxWorkbook): string {
   const key = r * MAX_COL + c
   const e = getEntry(d, r, c)
   const f = d.formulas.get(key)
@@ -1425,18 +1550,19 @@ function cellXml(d: SheetData, r: number, c: number, P: string, wb: XlsxWorkbook
     if (t === T_NUM) return `<${P}c r="${ref}"${s}>${fx}<${P}v>${String(v)}</${P}v></${P}c>`
     if (t === T_BOOL) return `<${P}c r="${ref}"${s} t="b">${fx}<${P}v>${v ? 1 : 0}</${P}v></${P}c>`
     if (t === T_ERR) return `<${P}c r="${ref}"${s} t="e">${fx}<${P}v>${escText(String(v))}</${P}v></${P}c>`
-    if (t === T_STR && !String(v).startsWith('=')) return `<${P}c r="${ref}"${s} t="str">${fx}<${P}v>${escText(String(v))}</${P}v></${P}c>`
+    // (a formula typed and not computed yet holds its own text as value; a result that starts with "=" is a result)
+    if (t === T_STR && String(v) !== '=' + f) return `<${P}c r="${ref}"${s} t="str">${fx}<${P}v>${escText(xText(String(v)))}</${P}v></${P}c>`
     return `<${P}c r="${ref}"${s}>${fx}</${P}c>`
   }
   const [t, v] = e!
   switch (t) {
     case T_NUM:
       return `<${P}c r="${ref}"${s}><${P}v>${String(v)}</${P}v></${P}c>`
+    // a shared string stays one (its runs are rich text, which an inline string could not hold)
     case T_SST:
-    case T_STR: {
-      const text = t === T_SST ? wb.sst[v as number] ?? '' : String(v)
-      return `<${P}c r="${ref}"${s} t="inlineStr"><${P}is><${P}t xml:space="preserve">${escText(text)}</${P}t></${P}is></${P}c>`
-    }
+      return `<${P}c r="${ref}"${s} t="s"><${P}v>${String(v)}</${P}v></${P}c>`
+    case T_STR:
+      return `<${P}c r="${ref}"${s} t="inlineStr"><${P}is><${P}t xml:space="preserve">${escText(xText(String(v)))}</${P}t></${P}is></${P}c>`
     case T_BOOL:
       return `<${P}c r="${ref}"${s} t="b"><${P}v>${v ? 1 : 0}</${P}v></${P}c>`
     case T_ERR:
@@ -1507,7 +1633,11 @@ function hideCols(d: SheetData, a: number, b: number, hidden: boolean) {
     const hi = Math.min(ci.max, b)
     covered.push([lo, hi])
     if (hidden) out.push(ci.w ? { ...ci, min: lo, max: hi, w: 0, prevW: ci.w } : { ...ci, min: lo, max: hi })
-    else out.push(ci.w ? { ...ci, min: lo, max: hi } : { min: lo, max: hi, w: ci.prevW || d.defaultColW })
+    else if (ci.w) out.push({ ...ci, min: lo, max: hi })
+    else {
+      const { prevW, ...rest } = ci
+      out.push({ ...rest, min: lo, max: hi, w: prevW || d.defaultColW })
+    }
   }
   if (hidden) {
     // columns without an explicit width
@@ -1569,7 +1699,7 @@ class RowPatcher {
   private rowAttrXml(r: number): string {
     const a = this.d.rowAttrs.get(r)
     if (!a) return ''
-    return (a.ht !== undefined ? ` ht="${a.ht}" customHeight="1"` : '') + (a.hidden ? ' hidden="1"' : '')
+    return (a.ht !== undefined ? ` ht="${a.ht}" customHeight="1"` : '') + (a.hidden ? ' hidden="1"' : '') + attrsXml(a.x)
   }
 
   private before(r: number): string {
@@ -1609,7 +1739,8 @@ class RowPatcher {
     const P = this.P
     const cols = [...this.d.colInfo].sort((a, b) => a.min - b.min)
     if (!cols.length) return ''
-    return `<${P}cols>${cols.map((c) => `<${P}col min="${c.min + 1}" max="${c.max + 1}" width="${+((c.w || c.prevW || 0) / 7).toFixed(4)}" customWidth="1"${c.w ? '' : ' hidden="1"'}/>`).join('')}</${P}cols>`
+    const width = (c: ColInfo) => +((c.w || c.prevW || this.d.defaultColW) / 7).toFixed(4)
+    return `<${P}cols>${cols.map((c) => `<${P}col min="${c.min + 1}" max="${c.max + 1}" width="${width(c)}" customWidth="1"${c.w ? '' : ' hidden="1"'}${attrsXml(c.x)}/>`).join('')}</${P}cols>`
   }
 
   private headFix(head: string): string {

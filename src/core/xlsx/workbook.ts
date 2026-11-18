@@ -11,7 +11,7 @@ import { expandShared, formulaAt } from './structure'
 import { stripFunctionPrefixes } from './formula'
 import type { Shift } from './follow'
 import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlCapped, ooxmlInt, ooxmlNumber } from './limits'
-import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
+import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowAttrs, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
 
 export const T_NUM = 0
 export const T_SST = 1
@@ -78,9 +78,11 @@ export class SheetData {
   /** edited cell keys (r * MAX_COL + c) */
   edited = new Set<number>()
   /** row heights in pt / hidden flags (from the file or the editor) */
-  rowAttrs = new Map<number, { ht?: number; hidden?: boolean }>()
+  rowAttrs = new Map<number, RowAttrs>()
   /** rows grown to fit a large font (no explicit height in the file): px */
   autoRowH = new Map<number, number>()
+  /** attributes of <sheetProtection> when the sheet is protected (`sheet="1"`) */
+  protection?: Record<string, string>
   /** whole-sheet rewrite needed (rows/cols inserted or deleted) */
   structural = false
   /** sections to regenerate on save */
@@ -118,6 +120,15 @@ export class SheetData {
   done = false
   error?: string
   loading?: Promise<void>
+}
+
+/** attributes of <row> / <col> the model does not edit but a rewrite of the element must keep */
+const ROW_KEEP = ['s', 'customFormat', 'outlineLevel', 'collapsed', 'thickTop', 'thickBot', 'ph']
+const COL_KEEP = ['style', 'outlineLevel', 'collapsed', 'bestFit', 'phonetic']
+const keep = (a: Attrs, names: string[]): Record<string, string> | undefined => {
+  let out: Record<string, string> | undefined
+  for (const n of names) if (a[n] !== undefined) (out ??= {})[n] = a[n]
+  return out
 }
 
 class SheetHandler implements SaxHandler {
@@ -192,7 +203,8 @@ class SheetHandler implements SaxHandler {
         const hidden = a.hidden === '1' || a.hidden === 'true'
         // (a height past Excel's largest: the largest, not the default)
         const ht = ooxmlCapped(a.ht, 0, MAX_ROW_HEIGHT_PT)
-        if (hidden || ht !== undefined) this.d.rowAttrs.set(this.row, { ht, hidden: hidden || undefined })
+        const x = keep(a, ROW_KEEP)
+        if (hidden || ht !== undefined || x) this.d.rowAttrs.set(this.row, { ht, hidden: hidden || undefined, x })
         this.rowHasHt = hidden || ht !== undefined
         this.rowMaxPt = 0
         if (hidden) this.newSizes.push([this.row, 0])
@@ -222,9 +234,17 @@ class SheetHandler implements SaxHandler {
         const width = ooxmlCapped(a.width, 0, MAX_COL_WIDTH)
         if (a.width !== undefined && width === undefined) return
         const w = hidden ? 0 : width !== undefined ? Math.round(width * 7) : this.d.defaultColW
-        this.d.colInfo.push({ min, max, w })
+        const ci: ColInfo = { min, max, w }
+        const x = keep(a, COL_KEEP)
+        if (x) ci.x = x
+        // the width a hidden column comes back with when shown
+        if (hidden && width !== undefined) ci.prevW = Math.round(width * 7)
+        this.d.colInfo.push(ci)
         return
       }
+      case 'sheetProtection':
+        if (a.sheet === '1' || a.sheet === 'true') this.d.protection = { ...a }
+        return
       case 'pane':
         if (a.state === 'frozen' || a.state === 'frozenSplit') {
           this.d.frozen = { rows: ooxmlInt(a.ySplit, 0, MAX_ROWS - 1) ?? 0, cols: ooxmlInt(a.xSplit, 0, MAX_COL - 1) ?? 0 }
@@ -402,6 +422,8 @@ export class XlsxWorkbook {
   comments = new XlsxComments()
   readonly calc = new Calc(this)
   sst: string[] = []
+  /** `<workbookProtection lockStructure>`: sheets cannot be added, renamed, deleted or moved */
+  lockStructure = false
   private sstLoading?: Promise<void>
   /** sheets filled from something else than their XML (a text file being imported), by sheet path: run when the sheet loads */
   readonly loaders = new Map<string, SheetLoader>()
@@ -435,6 +457,8 @@ export class XlsxWorkbook {
     const date1904 = pr?.a.date1904 === '1' || pr?.a.date1904 === 'true'
     const full = kid(root, 'calcPr')?.a.fullCalcOnLoad
     const wb = new XlsxWorkbook(pkg, mainPath, rels, sheets, styles, date1904, theme, full === '1' || full === 'true')
+    const lock = kid(root, 'workbookProtection')?.a.lockStructure
+    wb.lockStructure = lock === '1' || lock === 'true'
     wb.comments = await readXlsxComments(pkg, mainPath, rels, sheets).catch((e: Error) => {
       console.warn('[office-engine] comments not read:', e.message)
       return new XlsxComments()
@@ -785,6 +809,6 @@ export class XlsxWorkbook {
 export function rowSizesOf(d: SheetData): [number, number][] {
   const out: [number, number][] = []
   for (const [r, px] of d.autoRowH) if (!d.rowAttrs.has(r)) out.push([r, px])
-  for (const [r, a] of d.rowAttrs) out.push([r, a.hidden ? 0 : a.ht !== undefined ? Math.round((a.ht * 4) / 3) : (d.autoRowH.get(r) ?? d.defaultRowH)])
+  for (const [r, a] of d.rowAttrs) if (a.ht !== undefined || a.hidden || d.autoRowH.has(r)) out.push([r, a.hidden ? 0 : a.ht !== undefined ? Math.round((a.ht * 4) / 3) : (d.autoRowH.get(r) ?? d.defaultRowH)])
   return out
 }

@@ -3,7 +3,7 @@
  * merges, sizes. Formulas (this sheet and others pointing at it) are shifted.
  */
 import { shiftFormula, translateFormula, translator } from './formula'
-import type { ColInfo, Merge, Range } from './types'
+import type { ColInfo, Merge, Range, RowAttrs } from './types'
 import type { Shift } from './follow'
 import { MAX_COL, MAX_ROWS, T_EMPTY, type SheetData } from './workbook'
 
@@ -14,7 +14,7 @@ export interface Snapshot {
   shifts: Shift[]
   merges: Merge[]
   colInfo: ColInfo[]
-  rowAttrs: Map<number, { ht?: number; hidden?: boolean }>
+  rowAttrs: Map<number, RowAttrs>
   autoRowH: Map<number, number>
   maxRow: number
   maxCol: number
@@ -156,7 +156,7 @@ export function shiftSheet(d: SheetData, sheetName: string, axis: 'row' | 'col',
     else d.rows.splice(at, -delta)
     if (d.rows.length > MAX_ROWS) d.rows.length = MAX_ROWS
     d.maxRow = Math.min(MAX_ROWS - 1, Math.max(-1, d.maxRow + (d.maxRow >= at ? delta : 0)))
-    const attrs = new Map<number, { ht?: number; hidden?: boolean }>()
+    const attrs = new Map<number, RowAttrs>()
     for (const [r, v] of d.rowAttrs) {
       if (delta < 0 && r >= at && r < end) continue
       const to = r >= at ? r + delta : r
@@ -272,22 +272,36 @@ export function setMerge(d: SheetData, range: Range, merge: boolean) {
 }
 
 export function setColWidth(d: SheetData, c0: number, c1: number, px: number) {
+  const w = Math.max(0, Math.round(px))
   const out: ColInfo[] = []
+  const covered: [number, number][] = []
   for (const ci of d.colInfo) {
     if (ci.max < c0 || ci.min > c1) out.push(ci)
     else {
       if (ci.min < c0) out.push({ ...ci, max: c0 - 1 })
       if (ci.max > c1) out.push({ ...ci, min: c1 + 1 })
+      // the columns keep their style, outline level…: only their width is new
+      const { prevW: _p, ...rest } = ci
+      const lo = Math.max(ci.min, c0)
+      const hi = Math.min(ci.max, c1)
+      covered.push([lo, hi])
+      out.push({ ...rest, min: lo, max: hi, w })
     }
   }
-  out.push({ min: c0, max: c1, w: Math.max(0, Math.round(px)) })
+  covered.sort((x, y) => x[0] - y[0])
+  let from = c0
+  for (const [lo, hi] of [...covered, [c1 + 1, c1 + 1] as [number, number]]) {
+    if (lo > from) out.push({ min: from, max: Math.min(lo - 1, c1), w })
+    from = Math.max(from, hi + 1)
+  }
   d.colInfo = out.sort((a, b) => a.min - b.min)
   d.dirtyCols = true
 }
 
 export function setRowHeight(d: SheetData, r0: number, r1: number, px: number) {
   for (let r = r0; r <= r1; r++) {
-    d.rowAttrs.set(r, px > 0 ? { ht: +(px * 0.75).toFixed(2) } : { ...(d.rowAttrs.get(r) ?? {}), hidden: true })
+    const cur = d.rowAttrs.get(r)
+    d.rowAttrs.set(r, px > 0 ? { ht: +(px * 0.75).toFixed(2), ...(cur?.x && { x: cur.x }) } : { ...(cur ?? {}), hidden: true })
     d.dirtyRows.add(r)
   }
 }

@@ -137,7 +137,7 @@ describe('xlsx: the saved file is a valid workbook', () => {
 
   test('C5: merged cells of a filtered sheet are written after the filter, not inside it', async () => {
     const tail = '<autoFilter ref="A1:B5"><filterColumn colId="0"><filters><filter val="x"/></filters></filterColumn><sortState ref="A2:B5"><sortCondition ref="A2:A5"/></sortState></autoFilter>'
-    for (const t of [tail, '<sheetProtection sheet="1"/><autoFilter ref="A1:B5"/><sortState ref="A2:B5"><sortCondition descending="1" ref="A2:A5"/></sortState><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>']) {
+    for (const t of [tail, '<sheetProtection sheet="0"/><autoFilter ref="A1:B5"/><sortState ref="A2:B5"><sortCondition descending="1" ref="A2:A5"/></sortState><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>']) {
       const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows([['h', 'k'], ['x', 1]]), tail: t }] }))
       await o.engine.call('xlsx.sheetOp', [0, { op: 'merge', range: { r0: 6, c0: 0, r1: 6, c1: 2 } }])
       const xml = await (await o.save()).text('xl/worksheets/sheet1.xml')
@@ -889,7 +889,7 @@ describe('xlsx: files written loosely are read without losing cells (PR25-002, -
   test('a column record past the last column, a width or a height past the largest: kept, as large as allowed', async () => {
     const o = await openBook(await book({ sheets: [{ name: 'S', head: '<cols><col min="2" max="16385" width="20" hidden="1"/><col min="1" max="1" width="300"/></cols>', rows: '<row r="1" ht="500"><c r="A1"><v>1</v></c></row>' }] }))
     const p = o.events.filter((e) => e.event === 'xlsx:progress').map((e) => e.data)
-    expect(p.find((x) => x.colInfo)?.colInfo).toEqual([{ min: 1, max: 16383, w: 0 }, { min: 0, max: 0, w: 1785 }])
+    expect(p.find((x) => x.colInfo)?.colInfo).toEqual([{ min: 1, max: 16383, w: 0, prevW: 140 }, { min: 0, max: 0, w: 1785 }])
     expect(p.flatMap((x) => x.rowSizes)).toContainEqual([0, 546])
   })
 })
