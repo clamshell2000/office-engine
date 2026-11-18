@@ -482,7 +482,7 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
       placeholder: 'https://…',
       initial: cur,
       ok: 'Apply',
-      onOk: (v) => void editor.setLink(v.trim() || null),
+      onOk: (v) => void editor.setLink(v.trim() || null).catch((e: Error) => setToast(e.message)),
       extra: cur ? { label: 'Remove', run: () => void editor.setLink(null) } : undefined,
     })
   }

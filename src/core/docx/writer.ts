@@ -3,6 +3,7 @@
  * (pPr / rPr / inline objects copied verbatim, only changed properties patched);
  * everything else is written back byte-for-byte.
  */
+import { safeHref } from '../url'
 import { officeHex } from '../color'
 import { relOfType } from '../opc'
 import { cssFont } from '../fonts'
@@ -782,6 +783,8 @@ export async function addImage(doc: DocxDocument, bytes: Uint8Array, ext: string
 
 /** External hyperlink relationship; returns the run link key ('r:rIdN'). */
 export async function addLink(doc: DocxDocument, url: string): Promise<string> {
+  // the file is read by other programs: a link that runs code (javascript:, data:…) is not written into it
+  if (!safeHref(url)) throw new Error('This link cannot be used: a document takes web, mail and phone links')
   const rid = await doc.pkg.addRel(doc.mainPath, HYPERLINK_REL, url, true)
   doc.rels = await doc.pkg.rels(doc.mainPath)
   return 'r:' + rid

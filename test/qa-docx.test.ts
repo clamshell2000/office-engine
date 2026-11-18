@@ -164,6 +164,26 @@ describe('C20 XML reader is linear', () => {
   })
 })
 
+describe('N2-008 / P3-020 links that run code', () => {
+  test('a document takes web, mail and phone links only', async () => {
+    const { engine } = await openDocx(await mkDocx('<w:p><w:r><w:t>x</w:t></w:r></w:p>'))
+    for (const url of ['javascript:alert(document.domain)', 'JaVaScRiPt:alert(1)', ' javascript:alert(1)', 'java\tscript:alert(1)', 'vbscript:x', 'data:text/html,<script>1</script>', 'file:///etc/passwd']) {
+      await expect(engine.call('docx.link', [url])).rejects.toThrow(/cannot be used/)
+    }
+    for (const url of ['https://example.com/a?b=1#c', 'mailto:a@example.com', 'tel:+84123456789', '#bookmark']) expect(typeof (await engine.call('docx.link', [url]))).toBe('string')
+    const saved = (await engine.call('save', [])) as Blob
+    const rels = await partText(saved, 'word/_rels/document.xml.rels')
+    expect(rels).not.toContain('javascript')
+    expect(rels).toContain('https://example.com/a?b=1#c')
+  })
+
+  test('a scheme spelled with HTML entities is still a scheme', async () => {
+    const { safeHref } = await import('../src/core/url')
+    for (const url of ['javascript&colon;alert(1)', 'javascript&COLON;alert(1)', '&NewLine;javascript:alert(3)', 'java&Tab;script:alert(1)', 'javascript&#58;alert(1)', 'javascript&#x3a;alert(1)', '&#106;avascript:alert(1)']) expect(safeHref(url)).toBeUndefined()
+    for (const url of ['https://example.com/?a=1&colon=2', 'page.html?x=1&amp;y=2', 'mailto:a&b@example.com', '#top']) expect(safeHref(url)).toBe(url)
+  })
+})
+
 describe('C19 list markers are bounded', () => {
   test('formatNumber caps every numbering format', () => {
     for (const fmt of ['upperRoman', 'lowerRoman', 'upperLetter', 'lowerLetter', 'decimalZero', 'ordinal', 'decimal']) {

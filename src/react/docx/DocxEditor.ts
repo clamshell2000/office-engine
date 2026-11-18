@@ -1180,7 +1180,8 @@ export class DocxEditor implements RichHost<Paragraph> {
       this.patchRuns(sel, (r) => ({ ...r, href: undefined, lk: undefined }))
       return
     }
-    const href = /^[a-z][\w+.-]*:/i.test(url) || url.startsWith('#') ? url : 'https://' + url
+    const href = /^[a-z][\w+.-]*:/i.test(url.trim()) || url.startsWith('#') ? url.trim() : 'https://' + url.trim()
+    // (refused by the worker when following it could run code: javascript:, data:…)
     const lk = await this.client.call('docx.link', href)
     const style = { color: '#0563c1', u: 'single' }
     if (collapsed(sel)) {
@@ -1250,7 +1251,15 @@ export class DocxEditor implements RichHost<Paragraph> {
     if (!paras.length) return false
     void (async () => {
       const links = new Map<string, string>()
-      for (const p of paras) for (const r of p.runs) if (r.t === 'text' && r.href && !links.has(r.href)) links.set(r.href, await this.client.call('docx.link', r.href))
+      for (const p of paras) {
+        for (const r of p.runs) {
+          if (r.t !== 'text' || !r.href || links.has(r.href)) continue
+          // a link the document does not take is pasted as its text
+          const lk = await this.client.call('docx.link', r.href).catch(() => undefined)
+          if (lk) links.set(r.href, lk)
+          else r.href = undefined
+        }
+      }
       const lines = paras.map((p) => p.runs.map((r) => (r.t === 'text' && r.href ? { ...r, lk: links.get(r.href) } : r)) as RRun[])
       const headingId = (n: number) => this.styles.find((s) => s.name.toLowerCase() === `heading ${n}`)?.id
       const props = paras.map((p) => {
