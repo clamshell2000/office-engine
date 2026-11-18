@@ -36,6 +36,16 @@ export interface RangeRef {
 export interface CellProvider {
   /** value of a cell; formula cells return their current computed value */
   value(sheet: string | undefined, r: number, c: number): Value
+  /**
+   * The cells of a block, row by row: what `value` gives for each, read faster than one by one (optional). A cell
+   * without anything is null.
+   */
+  read?(sheet: string | undefined, r0: number, c0: number, r1: number, c1: number, cb: (v: Value, i: number, j: number) => void): void
+  /**
+   * The cells of a block as rows of values, when the provider keeps them (optional): a table every row of a sheet
+   * looks up is read once, not once per row. What it gives is shared: never changed in place.
+   */
+  block?(sheet: string | undefined, r0: number, c0: number, r1: number, c1: number): Value[][] | undefined
   /** used extent of a sheet, to clip whole-row/column ranges (optional) */
   bounds?(sheet: string | undefined): { rows: number; cols: number }
   /** sheet exists? (unknown sheet -> #REF!) optional */

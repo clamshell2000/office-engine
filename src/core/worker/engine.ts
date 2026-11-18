@@ -99,6 +99,7 @@ export class Engine {
     if (main.kind === 'docx') this.docx = await DocxDocument.open(pkg, main.path)
     else if (main.kind === 'xlsx') {
       const wb = (this.xlsx = await XlsxWorkbook.open(pkg, main.path))
+      wb.onValues = (p) => this.emit('xlsx:progress', p)
       if (tabular) {
         const imp = { source, sep: imported === 'tsv' ? '\t' : undefined, budget: params.residentCells, pageRows: params.pageRows }
         wb.loaders.set(wb.sheets[0].path, (d, report) => loadDelimited(d, imp, report))

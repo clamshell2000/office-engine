@@ -103,6 +103,8 @@ export class SheetData {
   uncached: number[] = []
   /** its formulas were computed after it was read (a workbook that says to compute on load) */
   calculated = false
+  /** it has formulas whose value is of the moment they are computed (TODAY, NOW, RAND): computed when the file is read, as Excel does */
+  clock = false
   rows: (unknown[] | undefined)[] = []
   /** a sheet too large for memory: its rows are read from the file by pages, those in memory being in `rows` */
   pages?: RowPages
@@ -272,7 +274,10 @@ class SheetHandler implements SaxHandler {
         if (again) this.rowUnordered = true
         else this.rowLast = c
         const key = this.row * MAX_COL + c
-        if (this.formula) this.d.formulas.set(key, this.formula)
+        if (this.formula) {
+          this.d.formulas.set(key, this.formula)
+          if (!this.d.clock && CLOCK.test(this.formula)) this.d.clock = true
+        }
         // (a column read twice: the cell read last is the cell, with its formula or without)
         else if (again) this.d.formulas.delete(key)
         if (this.fArray) {
@@ -365,6 +370,9 @@ function ordered(cells: unknown[]): unknown[] {
   for (const k of [...at.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1])) out.push(cells[k], cells[k + 1], cells[k + 2], cells[k + 3])
   return out
 }
+
+/** a formula calling a function whose value is of the moment (what the file holds for it is of the day it was saved) */
+const CLOCK = /(?:^|[^A-Za-z0-9_.])(?:TODAY|NOW|RAND|RANDBETWEEN)\s*\(/i
 
 class SstHandler implements SaxHandler {
   strings: string[] = []
@@ -523,7 +531,7 @@ export class XlsxWorkbook {
         d.done = true
         emit({ ...this.snapshot(index, d, sizes, !sentHeader), merges: d.merges, ...(stale ? { recalc: true } : {}) })
         // files written by libraries often omit cached formula results, or hold zeros and say to compute: they are computed
-        if (d.uncached.length || (this.fullCalc && (d.formulas.size || d.depOf.size))) {
+        if (d.uncached.length || d.clock || (this.fullCalc && (d.formulas.size || d.depOf.size))) {
           void this.computeStale().then(() => {
             // (where the sheet is now: sheets may have been added or moved meanwhile; nowhere when it was deleted)
             const now = this.sheets.findIndex((s) => s.path === info.path)
@@ -540,6 +548,8 @@ export class XlsxWorkbook {
   }
 
   private stale?: Promise<void>
+  /** told the values of a sheet changed after it was read (computed in the background): the views read its cells again */
+  onValues?: (p: SheetProgress) => void
 
   /**
    * Computes the formulas the file gives no value for (all of them when it says to compute on load). In one pass
@@ -550,20 +560,27 @@ export class XlsxWorkbook {
     const run = async () => {
       await Promise.all(this.sheets.map((s) => this.loadSheet(s.index, () => {})))
       const cells: { sheet: number; key: number }[] = []
+      let clock = false
       for (const [sheet, d] of this.sheetsData) {
         if (!d.done || d.error) continue
         if (this.fullCalc && !d.calculated) {
           expandShared(d)
           for (const key of d.formulas.keys()) cells.push({ sheet, key })
         } else for (const key of d.uncached) cells.push({ sheet, key })
+        if (d.clock && !d.calculated) clock = true
         d.uncached = []
         d.calculated = true
       }
-      if (!cells.length) return
+      if (!cells.length && !clock) return
       this.calc.invalidate()
-      this.calc.computeMissing(cells)
+      const sheets = this.calc.computeMissing(cells, clock)
       // what computing them built (a parsed formula per cell) is not kept for a document that may only be read
       this.calc.invalidate()
+      // the sheets shown meanwhile show the values as they are now
+      for (const i of sheets) {
+        const d = this.sheetsData.get(i)
+        if (d?.done) this.onValues?.({ ...this.snapshot(i, d, [], false), recalc: true })
+      }
     }
     // one at a time; a sheet read after a pass (added, imported) gets the next
     const next = (this.stale ?? Promise.resolve()).then(run, run)

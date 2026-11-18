@@ -202,13 +202,36 @@ export class Evaluator implements Ev {
 
   forEach(rg: RangeV, cb: (v: Value, i: number, j: number) => void): void {
     const { r1, c1 } = this.clip(rg)
+    const p = this.provider
+    const kept = p.block?.(rg.sheet, rg.r0, rg.c0, r1, c1)
+    if (kept) {
+      for (let i = 0; i < kept.length; i++) for (let j = 0, row = kept[i]; j < row.length; j++) cb(row[j], i, j)
+      return
+    }
+    if (p.read) return p.read(rg.sheet, rg.r0, rg.c0, r1, c1, cb)
     for (let r = rg.r0; r <= r1; r++) for (let c = rg.c0; c <= c1; c++) cb(this.cell(rg.sheet, r, c), r - rg.r0, c - rg.c0)
   }
 
+  /** The values of a range / array / scalar as rows. Those of a range may be shared (see `CellProvider.block`): read, never changed. */
   toArray(v: Val): Value[][] {
     if (v instanceof RangeV) {
       const { r1, c1 } = this.clip(v)
+      const p = this.provider
+      const kept = p.block?.(v.sheet, v.r0, v.c0, r1, c1)
+      if (kept) return kept
       const out: Value[][] = []
+      if (p.read) {
+        const last = c1 - v.c0
+        let row: Value[] = []
+        p.read(v.sheet, v.r0, v.c0, r1, c1, (x, _i, j) => {
+          row.push(x)
+          if (j === last) {
+            out.push(row)
+            row = []
+          }
+        })
+        return out
+      }
       for (let r = v.r0; r <= r1; r++) {
         const row: Value[] = []
         for (let c = v.c0; c <= c1; c++) row.push(this.cell(v.sheet, r, c))
