@@ -41,6 +41,8 @@ export interface BookSpec {
   parts?: Record<string, string | Uint8Array>
   /** more `<Override>` / `<Default>` elements of the content types */
   types?: string
+  /** more relationships of the workbook part */
+  rels?: string
 }
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -104,6 +106,7 @@ export function book(spec: BookSpec): Promise<Blob> {
     parts.set('xl/styles.xml', spec.styles)
   }
   types += spec.types ?? ''
+  rels += spec.rels ?? ''
   parts.set('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">${types}</Types>`)
   parts.set('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`)
   parts.set('xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`)

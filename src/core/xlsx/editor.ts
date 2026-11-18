@@ -1030,7 +1030,8 @@ export class XlsxEditor {
       const f = d.formulas.get(r * MAX_COL + c)
       const raw = opts.formulas && f ? '=' + f : (await this.wb.cell(sheet, r, c))?.value
       if (raw === undefined || (f && !opts.formulas)) continue
-      const next = raw.replace(re, by)
+      // (the text to put, as it is: "$&" and "$1" mean nothing here)
+      const next = raw.replace(re, () => by)
       if (next !== raw) inputs.push({ r, c, input: next })
     }
     return inputs.length ? this.setCells(sheet, inputs) : null
@@ -1195,6 +1196,7 @@ export class XlsxEditor {
       case 'delete': {
         if (sheets.length <= 1) throw new Error('A workbook needs at least one sheet')
         const s = sheets[op.index]
+        if (s && !s.hidden && !sheets.some((x, i) => i !== op.index && !x.hidden)) throw new Error('A workbook needs at least one sheet that is not hidden')
         const node = entry(op.index)
         // its comments go with it
         for (const t of this.wb.comments.threads()) {
@@ -1212,6 +1214,8 @@ export class XlsxEditor {
         remap(sheets.map((_, i) => i).filter((i) => i !== op.index))
         // what read the sheet reads #REF! from now on, as Excel has it: a reference to a sheet the workbook does not have is not a formula it opens
         eachFormula((f) => dropSheetInFormula(f, s.name))
+        // the calculation chain lists its cells: it goes at the next save
+        this.formulaTouched = true
         this.wb.calc.invalidate()
         recalc = this.recalcAll()
         break
@@ -1282,12 +1286,13 @@ export class XlsxEditor {
       setAttr(calc, 'fullCalcOnLoad', '1')
       setOrdered(root, calc, 'calcPr', WB_ORDER)
       pkg.setPart(this.wb.mainPath, serialize(wbNodes))
-      const chain = relOfType(this.wb.rels, 'calcChain')
-      if (chain && this.formulaTouched && pkg.has(chain.target)) {
-        pkg.setPart(chain.target, null)
-        await pkg.removeRelsTo(this.wb.mainPath, chain.target)
-        await pkg.setContentType(chain.target, null)
-      }
+    }
+    // the calculation chain names formula cells that may be gone (Excel repairs a file whose chain does): it builds it again
+    const chain = relOfType(this.wb.rels, 'calcChain')
+    if (chain && this.formulaTouched && pkg.has(chain.target)) {
+      pkg.setPart(chain.target, null)
+      await pkg.removeRelsTo(this.wb.mainPath, chain.target)
+      await pkg.setContentType(chain.target, null)
     }
     // after the sheets: a sheet given comments here links its drawing of them
     if (this.wb.comments.dirty) await writeXlsxComments(pkg, this.wb.mainPath, this.wb.comments, this.wb.sheets)

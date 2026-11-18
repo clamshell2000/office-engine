@@ -913,3 +913,39 @@ describe('xlsx: TEXT() shows a number as its cell does (PR24-001)', () => {
     expect(text('TEXT(0.5,"#.##")')).toBe('.5')
   })
 })
+
+describe('xlsx: sheets, replace (P2-011 links, P2-018, P2-019, P2-023 / N1-017)', () => {
+  test('the text put by Replace is taken as it is', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows([['price'], ['abc'], ['USD 5']]) }] }))
+    await o.engine.call('xlsx.replace', [0, 'price', '$&$&'])
+    await o.engine.call('xlsx.replace', [0, 'abc', "$'X$`"])
+    await o.engine.call('xlsx.replace', [0, 'USD', '$1'])
+    expect([await o.shown(0, 0, 0), await o.shown(0, 1, 0), await o.shown(0, 2, 0)]).toEqual(['$&$&', "$'X$`", '$1 5'])
+  })
+
+  test('the last sheet that shows is not deleted; a deleted sheet takes the calculation chain with it', async () => {
+    const o = await openBook(
+      await book({
+        sheets: [{ name: 'Shown', rows: rows([[1]]) }, { name: 'Hidden', state: 'hidden', rows: rows([[{ f: 'Shown!A1', v: 1 }]]) }, { name: 'Other', rows: rows([[{ f: 'A2', v: 0 }]]) }],
+        parts: { 'xl/calcChain.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="A1" i="2"/><c r="A1" i="3"/></calcChain>' },
+        types: '<Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/>',
+        rels: '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/>',
+      }),
+    )
+    await o.engine.call('xlsx.bookOp', [{ op: 'delete', index: 2 }])
+    await expect(o.engine.call('xlsx.bookOp', [{ op: 'delete', index: 0 }])).rejects.toThrow(/not hidden/)
+    const s = await o.save()
+    expect(s.has('xl/calcChain.xml')).toBe(false)
+    expect(await s.text('xl/_rels/workbook.xml.rels')).not.toContain('calcChain')
+    expect(await s.text('[Content_Types].xml')).not.toContain('calcChain')
+    expect((await openBook(s.blob)).info.xlsx.sheets.map((x: any) => x.name)).toEqual(['Shown', 'Hidden'])
+  })
+
+  test('a link to a place in the workbook follows the sheet renamed and the rows moved', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'A', rows: rows([['go'], ['here']]), tail: `<hyperlinks><hyperlink ref="A1" location="'Sheet 2'!B2"/><hyperlink ref="A2" location="A!A9"/><hyperlink ref="A2" location="Top"/></hyperlinks>` }, { name: 'Sheet 2', rows: rows([[1]]) }] }))
+    await o.engine.call('xlsx.bookOp', [{ op: 'rename', index: 1, name: 'Targets' }])
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'insertRows', at: 4, n: 2 }])
+    const xml = await (await o.save()).text('xl/worksheets/sheet1.xml')
+    expect(xml).toContain('<hyperlink ref="A1" location="Targets!B2"/><hyperlink ref="A2" location="A!A11"/><hyperlink ref="A2" location="Top"/>')
+  })
+})

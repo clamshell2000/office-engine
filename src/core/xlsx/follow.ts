@@ -115,6 +115,12 @@ export function followSheetTail(xml: string, shifts: Shift[], renames: [string, 
           if (next !== ref) setAttr(n, attr, next)
         }
       }
+      if (name === 'hyperlink') {
+        // a link to a place in the workbook names its sheet
+        const to = getAttr(n, 'location')
+        const next = to === undefined ? undefined : formula(to)
+        if (next !== undefined && next !== to) setAttr(n, 'location', next)
+      }
       if (FORMULAS.has(name) && n.c.length) {
         const text = textContent(n)
         const next = formula(text)
