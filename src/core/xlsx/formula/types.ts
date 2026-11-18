@@ -1,9 +1,12 @@
 /** Core value / reference / provider types of the formula engine. */
 
-export type ErrorCode = '#DIV/0!' | '#VALUE!' | '#REF!' | '#NAME?' | '#N/A' | '#NUM!' | '#NULL!'
+export type ErrorCode = '#DIV/0!' | '#VALUE!' | '#REF!' | '#NAME?' | '#N/A' | '#NUM!' | '#NULL!' | '#SPILL!' | '#CALC!'
 
 /** ERROR.TYPE order (1-based). */
 export const ERROR_CODES: readonly ErrorCode[] = ['#NULL!', '#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#NUM!', '#N/A']
+
+/** the errors of dynamic arrays, which ERROR.TYPE numbers apart from the seven above */
+export const ERROR_TYPE_EXTRA: Readonly<Record<string, number>> = { '#SPILL!': 9, '#CALC!': 14 }
 
 export class FormulaError {
   constructor(readonly code: ErrorCode) {}
@@ -69,6 +72,11 @@ export class EvalSignal extends Error {}
 export class UnsupportedFormula extends EvalSignal {}
 
 export const MAX_ROW = 1048575
+/**
+ * Last row a formula may name: a sheet read from a large text file has rows past Excel's last (the evaluator takes a
+ * reference there for a name unless the sheet has that row).
+ */
+export const MAX_REF_ROW = 268435455
 export const MAX_COL = 16383
 
 export const ERR = {

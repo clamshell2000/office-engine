@@ -3,8 +3,9 @@
  * only the dependents (transitively) of the changed cells are re-evaluated.
  */
 import { EvalSignal, evaluate, evaluateArray, FormulaError, isVolatile, parseFormula, references, UnsupportedFormula, type Ast, type CellProvider, type Value } from './formula'
+import { isoToSerial } from './formula/dates'
 import { expandShared } from './structure'
-import { MAX_COL, MAX_ROWS, T_BOOL, T_EMPTY, T_ERR, T_NUM, T_SST, T_STR, type SheetData, type XlsxWorkbook } from './workbook'
+import { MAX_COL, MAX_ROWS, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST, T_STR, type SheetData, type XlsxWorkbook } from './workbook'
 
 type Id = string // `${sheet}:${key}`
 const idOf = (sheet: number, key: number) => `${sheet}:${key}`
@@ -261,6 +262,9 @@ export class Calc {
           return new FormulaError(String(v) as ConstructorParameters<typeof FormulaError>[0])
         case T_EMPTY:
           return null
+        case T_DATE:
+          // an ISO date is the number of its day (and time), as for a date typed in
+          return isoToSerial(String(v), this.wb.date1904) ?? String(v)
         default:
           return String(v)
       }

@@ -9,6 +9,7 @@ import { formatValue, formatText } from './numfmt'
 import { parseSheetStyles, type SheetStyles } from './styles'
 import { expandShared, formulaAt } from './structure'
 import { stripFunctionPrefixes } from './formula'
+import { isoToSerial } from './formula/dates'
 import type { Shift } from './follow'
 import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlCapped, ooxmlInt, ooxmlNumber } from './limits'
 import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
@@ -640,9 +641,16 @@ export class XlsxWorkbook {
           case T_ERR:
             cells.push([c, v as string, s, 2])
             break
-          case T_DATE:
-            cells.push([c, (v as string).replace('T00:00:00', '').replace('T', ' ').replace(/Z$/, ''), s, 1])
+          case T_DATE: {
+            // a date a library wrote as ISO text: shown with the number format of the cell, else as the text
+            const serial = xf.numFmt && xf.numFmt !== 'General' ? isoToSerial(v as string, this.date1904) : null
+            if (serial === null) cells.push([c, (v as string).replace('T00:00:00', '').replace('T', ' ').replace(/Z$/, ''), s, 1])
+            else {
+              const f = formatValue(serial, xf.numFmt, this.date1904)
+              cells.push(f.color ? [c, f.text, s, 1, f.color] : [c, f.text, s, 1])
+            }
             break
+          }
           default:
             cells.push([c, '', s, 0])
         }
