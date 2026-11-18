@@ -21,9 +21,16 @@ export interface Snapshot {
   frozen: { rows: number; cols: number }
 }
 
+/**
+ * The state of a sheet, to go back to. The rows are the sheet's own, not copies (a sheet of 300 000 rows was copied
+ * twice per inserted row, for Undo): they are marked as held, and what changes a row in place copies a held one
+ * first (`ownRow`).
+ */
 export function snapshot(d: SheetData): Snapshot {
+  const held = (d.held ??= new WeakSet())
+  for (const row of d.rows) if (row) held.add(row)
   return {
-    rows: d.rows.map((r) => (r ? r.slice() : r)),
+    rows: d.rows.slice(),
     formulas: new Map(d.formulas),
     arrays: new Map(d.arrays),
     shifts: d.shifts.slice(),
@@ -38,7 +45,8 @@ export function snapshot(d: SheetData): Snapshot {
 }
 
 export function restore(d: SheetData, s: Snapshot) {
-  d.rows = s.rows.map((r) => (r ? r.slice() : r))
+  // (the rows of the snapshot themselves: they are held, a change copies them)
+  d.rows = s.rows.slice()
   d.formulas = new Map(s.formulas)
   d.arrays = new Map(s.arrays)
   d.shifts = s.shifts.slice()

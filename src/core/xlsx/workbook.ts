@@ -69,6 +69,32 @@ function worksheetRef(ref: string): [number, number] | undefined {
   return r < MAX_ROWS && c < MAX_COL ? [r, c] : undefined
 }
 
+/** index in a row's entries (column, type, value, style: four slots each, by column) of the first at column `c` or after */
+export function colAt(row: unknown[], c: number): number {
+  // (the first cells of a row are the ones read most)
+  if (!row.length || (row[0] as number) >= c) return 0
+  let lo = 0
+  let hi = row.length >> 2
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if ((row[mid << 2] as number) < c) lo = mid + 1
+    else hi = mid
+  }
+  return lo << 2
+}
+
+/**
+ * Row `r` of a sheet, to change in place: a row a snapshot holds (`SheetData.held`) is copied first, so that what
+ * the snapshot was taken of stays as it was.
+ */
+export function ownRow(d: SheetData, r: number): unknown[] | undefined {
+  const row = d.rows[r]
+  if (!row || !d.held?.has(row)) return row
+  const own = row.slice()
+  d.rows[r] = own
+  return own
+}
+
 export class SheetData {
   /** shared formula groups: si → master cell key + formula text */
   shared = new Map<number, { master: number; text: string }>()
@@ -92,6 +118,8 @@ export class SheetData {
   dirtyView = false
   /** rows whose height/visibility changed */
   dirtyRows = new Set<number>()
+  /** rows whose cells moved as wholes (a sort): written again from the model, every cell of them */
+  rewrite = new Set<number>()
   /** formulas rewritten because another sheet changed */
   formulaChanged = false
   /** formula cells computed anew since the sheet was read: the value the file holds for them is stale */
@@ -109,6 +137,8 @@ export class SheetData {
   /** it has formulas whose value is of the moment they are computed (TODAY, NOW, RAND): computed when the file is read, as Excel does */
   clock = false
   rows: (unknown[] | undefined)[] = []
+  /** rows that snapshots (Undo of inserted / deleted rows and columns) hold as they are: see `ownRow` */
+  held?: WeakSet<unknown[]>
   /** a sheet too large for memory: its rows are read from the file by pages, those in memory being in `rows` */
   pages?: RowPages
   maxRow = -1

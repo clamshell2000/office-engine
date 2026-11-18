@@ -160,3 +160,129 @@ describe('what is typed (P1-027, N1-007, N1-022)', () => {
     expect(await o.shown(0, 1, 9)).toBe('7')
   })
 })
+
+describe('sorting (P2-021, P2-022, N1-020, P2-036)', () => {
+  const col = async (o: Opened, c: number, n: number) => Promise.all(Array.from({ length: n }, (_, r) => o.shown(0, r, c)))
+
+  test('Excel\'s order: numbers, text by its letters, FALSE and TRUE, errors, then the cells without anything', async () => {
+    const values: any[] = ['apple', 10, 'item2', true, 0, null, 'b', -1, 'Apple', 'item10', false, '10', 9, '9']
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows(values.map((v, i) => [v, i])) }] }))
+    await o.set(0, 'A5', '=NA()')
+    const range = { r0: 0, c0: 0, r1: values.length - 1, c1: 1 }
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'sort', range, col: 0 }])
+    expect(await col(o, 0, values.length)).toEqual(['-1', '9', '10', '10', '9', 'apple', 'Apple', 'b', 'item10', 'item2', 'FALSE', 'TRUE', '#N/A', ''])
+    // the cells beside go with their rows
+    expect((await col(o, 1, values.length)).slice(0, 3)).toEqual(['7', '12', '1'])
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'sort', range, col: 0, desc: true }])
+    expect(await col(o, 0, values.length)).toEqual(['#N/A', 'TRUE', 'FALSE', 'item2', 'item10', 'b', 'apple', 'Apple', '9', '10', '10', '9', '-1', ''])
+    await o.engine.call('xlsx.undo', [])
+    await o.engine.call('xlsx.undo', [])
+    expect(await col(o, 0, 4)).toEqual(['apple', '10', 'item2', 'TRUE'])
+    expect(await o.formula(0, 4, 0)).toBe('=NA()')
+  })
+
+  test('formulas reading their row go with it, in the file too; a range with merged cells is refused; a fill skips the cells under a merge', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows([[3, { f: 'A1*2', v: 6 }, 'c'], [1, { f: 'A2*2', v: 2 }, 'a'], [2, { f: 'A3*2', v: 4 }, 'b']]), tail: '<mergeCells count="1"><mergeCell ref="E2:E3"/></mergeCells>' }] }))
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'sort', range: { r0: 0, c0: 0, r1: 2, c1: 2 }, col: 0 }])
+    expect([await o.formula(0, 0, 1), await o.shown(0, 0, 1), await o.shown(0, 0, 2), await o.formula(0, 2, 1), await o.shown(0, 2, 1)]).toEqual(['=A1*2', '2', 'a', '=A3*2', '6'])
+    const saved = await o.save()
+    const xml = await saved.text('xl/worksheets/sheet1.xml')
+    expect(xml).toContain('<row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>A1*2</f><v>2</v></c>')
+    const re = await openBook(saved.blob)
+    expect([await re.shown(0, 2, 0), await re.shown(0, 2, 1), await re.shown(0, 2, 2)]).toEqual(['3', '6', 'c'])
+    await expect(o.engine.call('xlsx.sheetOp', [0, { op: 'sort', range: { r0: 0, c0: 0, r1: 2, c1: 4 }, col: 0 }])).rejects.toThrow(/merged cells/)
+    // E2:E3 is one cell: a fill down D1:E3 writes D2, D3 and E2, not the E3 nobody sees
+    await o.set(0, 'D1', 'x')
+    await o.set(0, 'E1', 'y')
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'fill', range: { r0: 0, c0: 3, r1: 2, c1: 4 }, dir: 'down' }])
+    expect([await o.shown(0, 2, 3), await o.shown(0, 1, 4), await o.shown(0, 2, 4)]).toEqual(['x', 'y', ''])
+  })
+
+  test('a comment goes with its row, and back when the sort is undone', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows([[3, 'c'], [1, 'a'], [2, 'b']]) }] }))
+    const sheet = o.info.xlsx.sheets[0].path
+    await o.engine.call('comments.set', ['c1', { id: 'c1', author: { name: 'Ann' }, at: { sheet, r: 0, c: 1 }, text: 'on c', time: '2026-11-19T00:00:00Z' }])
+    const where = async () => ((await o.engine.call('comments.list', [])) as any[]).find((c) => c.id === 'c1').at.r
+    await o.engine.call('xlsx.sheetOp', [0, { op: 'sort', range: { r0: 0, c0: 0, r1: 2, c1: 1 }, col: 0 }])
+    expect([await o.shown(0, 2, 1), await where()]).toEqual(['c', 2])
+    await o.engine.call('xlsx.undo', [])
+    expect(await where()).toBe(0)
+    await o.engine.call('xlsx.redo', [])
+    expect(await where()).toBe(2)
+  })
+})
+
+describe('Undo and Redo go through every state again (snapshots share the rows they were taken of)', () => {
+  const dump = async (o: Opened) => {
+    const b: any = await o.engine.call('xlsx.block', [0, 0, 60])
+    const cells = b.rows.map((r: any) => [r.r, r.cells.filter((c: any) => c[1] !== '' || c[2]).map((c: any) => [c[0], c[1], c[2]])]).filter((r: any) => r[1].length)
+    const formulas: string[] = []
+    for (let r = 0; r < 40; r++) for (let c = 0; c < 8; c++) {
+      const f = await o.formula(0, r, c)
+      if (f) formulas.push(`${r},${c}${f}`)
+    }
+    // (the sheet as the worker holds it: asking through an operation would be a step of the history under test)
+    const d = (o.engine as any).xlsx.sheetsData.get(0)
+    return JSON.stringify([cells, formulas, [...d.merges].sort((a: any, b: any) => a.r0 - b.r0 || a.c0 - b.c0)])
+  }
+  for (const start of [3, 11, 29, 47]) test(`seed ${start}`, async () => {
+    let seed = start
+    const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296)
+    const int = (n: number) => Math.floor(rand() * n)
+    const grid: any[][] = []
+    for (let r = 0; r < 14; r++) grid.push([r % 5, `t${r}`, { f: `A${r + 1}*2`, v: (r % 5) * 2 }, r < 4 ? { f: `SUM(A1:A${r + 2})`, v: [1, 3, 6, 10][r] } : null, 14 - r])
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: rows(grid) }, { name: 'T', rows: rows([[{ f: 'S!A3+S!C5', v: 10 }]]) }] }))
+    await o.load(1)
+    const states = [await dump(o)]
+    const steps = 26
+    let done = 0
+    for (let i = 0; i < steps; i++) {
+      const r = int(12)
+      const c = int(5)
+      const x = rand()
+      const call = (m: string, ...a: unknown[]) => o.engine.call(m as never, a)
+      try {
+        let res: any
+        if (x < 0.25) res = await call('xlsx.set', 0, [{ r, c, input: rand() < 0.4 ? `=A${r + 1}+B${int(10) + 1}` : rand() < 0.5 ? String(i) : `v${i}` }])
+        else if (x < 0.36) res = await call('xlsx.format', 0, { r0: r, c0: c, r1: r + 1, c1: c + 1 }, { b: rand() < 0.5 })
+        else if (x < 0.46) res = await call('xlsx.sheetOp', 0, { op: 'insertRows', at: r, n: 1 + int(2) })
+        else if (x < 0.54) res = await call('xlsx.sheetOp', 0, { op: 'deleteRows', at: r, n: 1 })
+        else if (x < 0.6) res = await call('xlsx.sheetOp', 0, { op: 'insertCols', at: c, n: 1 })
+        else if (x < 0.66) res = await call('xlsx.sheetOp', 0, { op: 'deleteCols', at: c, n: 1 })
+        else if (x < 0.8) res = await call('xlsx.sheetOp', 0, { op: 'sort', range: { r0: r, c0: 0, r1: r + 5, c1: 4 }, col: c, desc: rand() < 0.5 })
+        else if (x < 0.87) res = await call('xlsx.sheetOp', 0, { op: 'clear', range: { r0: r, c0: c, r1: r + 1, c1: c + 1 } })
+        else if (x < 0.94) res = await call('xlsx.sheetOp', 0, { op: 'fill', range: { r0: r, c0: c, r1: r + 2, c1: c }, dir: 'down' })
+        else res = await call('xlsx.sheetOp', 0, { op: 'merge', range: { r0: 20 + int(4), c0: c, r1: 25, c1: c + 1 } })
+        // (a sort that moves nothing, a clear of nothing: no step)
+        const now = await dump(o)
+        if (res && now !== states[states.length - 1]) {
+          states.push(now)
+          done++
+        }
+      } catch {
+        // refused (a sort over merged cells…): nothing changed
+        expect(await dump(o)).toBe(states[states.length - 1])
+      }
+    }
+    expect(done).toBeGreaterThan(10)
+    const final = states[states.length - 1]
+    const seen = new Set(states)
+    // back, state by state (a step that changed nothing shown is one Undo all the same: every state met is one that was)
+    for (let k = 0; k < 60; k++) {
+      const res = await o.engine.call('xlsx.undo', [])
+      if (!res) break
+      expect(seen.has(await dump(o))).toBe(true)
+    }
+    expect(await dump(o)).toBe(states[0])
+    for (let k = 0; k < 60; k++) {
+      const res = await o.engine.call('xlsx.redo', [])
+      if (!res) break
+      expect(seen.has(await dump(o))).toBe(true)
+    }
+    expect(await dump(o)).toBe(final)
+    // and the file written from there opens as that state
+    const re = await openBook((await o.save()).blob)
+    await re.load(1)
+    expect(await dump(re)).toBe(final)
+  }, 60_000)
+})

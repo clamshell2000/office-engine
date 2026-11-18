@@ -18,9 +18,11 @@ import { expandShared, overflows, restore, setColWidth, setFormula, setMerge, se
 import { dropSheetInFormula, moveRefsInFormula, parseFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type Ast, type MoveOp, type RefAddr } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
 import { tsvCell } from './clip'
+import { compare } from './formula/values'
+import type { Value } from './formula'
 import { followParts, followSheetTail, renameInCharts, sheetTail, type PartEdit } from './follow'
 import {
-  colName, DEFAULT_STYLES_PART, MAX_COL, MAX_ROWS, parseRef, rowSizesOf, SheetData, stylesPartOf, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST,
+  colAt, colName, DEFAULT_STYLES_PART, ownRow, MAX_COL, MAX_ROWS, parseRef, rowSizesOf, SheetData, stylesPartOf, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST,
   T_STR, XlsxWorkbook,
 } from './workbook'
 
@@ -56,6 +58,12 @@ export interface Change {
   others?: { sheet: number; key: number; prev: string; next: string }[]
   /** parts rewritten with it (defined names, tables, drawings, charts following rows / columns that moved) */
   parts?: PartEdit[]
+  /**
+   * The rows of `range` put in another order (a sort): row `i` of the range took the cells of row `order[i]`. The
+   * cells are moved, not kept here; the formulas among them, as their text was before and is after (it follows the
+   * move), by cell.
+   */
+  sort?: { order: number[]; before: [number, string][]; after: [number, string][] }
 }
 
 /** the functions that give a date: a cell without a format shows their result as one */
@@ -93,7 +101,7 @@ const SS_ORDER = ['numFmts', 'fonts', 'fills', 'borders', 'cellStyleXfs', 'cellX
 // ---------------------------------------------------------------- cell storage helpers
 
 function rowOf(d: SheetData, r: number, create: boolean): unknown[] | undefined {
-  let row = d.rows[r]
+  let row = ownRow(d, r)
   if (!row && create) d.rows[r] = row = []
   return row
 }
@@ -831,9 +839,13 @@ export class XlsxEditor {
     }
     for (const p of ch.parts ?? []) this.wb.pkg.setPart(p.path, which === 'prev' ? p.prev : p.next)
     if (ch.cm) for (const [id, c] of which === 'prev' ? [...ch.cm.before].reverse() : ch.cm.after) this.wb.comments.set(id, c)
+    if (ch.sort) {
+      if (which === 'next') this.moveRows(d, ch.range, ch.sort.order, ch.sort.before, ch.sort.after)
+      else this.moveRows(d, ch.range, inverse(ch.sort.order), ch.sort.after, ch.sort.before)
+    }
     this.apply(d, ch.cells, which)
     if (ch.lay) applyLayout(d, which === 'prev' ? ch.lay.before : ch.lay.after)
-    const recalc = ch.full || ch.others?.length ? this.recalcAll() : this.lastRecalc
+    const recalc = ch.full || ch.others?.length || ch.sort ? this.recalcAll() : this.lastRecalc
     return { sheet: ch.sheet, range: ch.range, layout: ch.full || ch.lay ? this.layout(ch.sheet) : undefined, recalc }
   }
 
@@ -883,6 +895,8 @@ export class XlsxEditor {
       lay: ch.lay ? { before: layoutState(d), after: which === 'prev' ? ch.lay.before : ch.lay.after } : undefined,
       full: ch.full ? { before: snapshot(d), after: which === 'prev' ? ch.full.before : ch.full.after } : undefined,
       others: ch.others?.map((o) => ({ ...o, prev: this.wb.sheetsData.get(o.sheet)?.formulas.get(o.key) ?? '', next: which === 'prev' ? o.prev : o.next })),
+      // (the rows as they are now, put back in the order they had)
+      sort: ch.sort && (which === 'prev' ? { order: inverse(ch.sort.order), before: ch.sort.after, after: ch.sort.before } : ch.sort),
       cm: ch.cm
         ? { before: ch.cm.before.map(([id]) => [id, this.wb.comments.get(id) ?? null]), after: which === 'prev' ? [...ch.cm.before].reverse() : ch.cm.after }
         : undefined,
@@ -1268,6 +1282,8 @@ export class XlsxEditor {
         const sr = dir === 'down' ? range.r0 : r
         const sc = dir === 'right' ? range.c0 : c
         if (sr === r && sc === c) continue
+        // a cell under a merged one is not shown: nothing is filled into it
+        if (d.merges.some((m) => m.r0 <= r && r <= m.r1 && m.c0 <= c && c <= m.c1 && (m.r0 !== r || m.c0 !== c))) continue
         const key = r * MAX_COL + c
         const src = getEntry(d, sr, sc)
         const sf = d.formulas.get(sr * MAX_COL + sc)
@@ -1279,45 +1295,120 @@ export class XlsxEditor {
     return this.record(sheet, changes, range)
   }
 
+  /**
+   * Sorts the rows of `range` by column `col`, in Excel's order: numbers, then text (as it compares in formulas: by
+   * letters, not by character codes; "item10" before "item2"), then FALSE and TRUE, then errors; cells without
+   * anything last, in either direction. The cells are moved (see `Change.sort`), formulas reading their own row
+   * with them, comments with their cells.
+   */
   private sort(sheet: number, d: SheetData, range: Range, col: number, desc: boolean): XlsxEditResult {
     expandShared(d)
-    const rows: { r: number; cells: (Entry | null)[]; f: (string | undefined)[]; key: unknown }[] = []
-    for (let r = range.r0; r <= range.r1; r++) {
-      const cells: (Entry | null)[] = []
-      const f: (string | undefined)[] = []
-      for (let c = range.c0; c <= range.c1; c++) {
-        cells.push(getEntry(d, r, c))
-        f.push(d.formulas.get(r * MAX_COL + c))
-      }
-      const e = getEntry(d, r, col)
-      const v = e ? (e[0] === T_SST ? this.wb.sst[e[1] as number] : e[1]) : null
-      rows.push({ r, cells, f, key: v === '' ? null : v })
+    // (Excel refuses too: "all the merged cells need to be the same size")
+    if (d.merges.some((m) => m.r1 >= range.r0 && m.r0 <= range.r1 && m.c1 >= range.c0 && m.c0 <= range.c1)) {
+      throw new Error('This range has merged cells: unmerge them to sort it.')
     }
-    const cmp = (a: unknown, b: unknown) => {
-      if (a === null || a === undefined) return 1
-      if (b === null || b === undefined) return -1
-      if (typeof a === 'number' && typeof b === 'number') return a - b
-      if (typeof a === 'number') return -1
-      if (typeof b === 'number') return 1
-      return String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true })
+    const n = range.r1 - range.r0 + 1
+    const rank = new Uint8Array(n)
+    const vals: Value[] = new Array(n)
+    for (let i = 0; i < n; i++) {
+      const e = getEntry(d, range.r0 + i, col)
+      const t = e ? e[0] : T_EMPTY
+      const v = e ? e[1] : ''
+      if (t === T_EMPTY || v === '' || v === undefined) rank[i] = 4
+      else if (t === T_NUM) [rank[i], vals[i]] = [0, v as number]
+      else if (t === T_BOOL) [rank[i], vals[i]] = [2, !!v]
+      else if (t === T_ERR) rank[i] = 3
+      else [rank[i], vals[i]] = [1, t === T_SST ? (this.wb.sst[v as number] ?? '') : String(v)]
+      if (rank[i] === 1 && vals[i] === '') rank[i] = 4
     }
-    const sorted = [...rows].sort((a, b) => {
-      const k = cmp(a.key, b.key)
-      return desc && a.key !== null && b.key !== null ? -k : k
+    const order = Array.from({ length: n }, (_, i) => i)
+    order.sort((x, y) => {
+      const a = rank[x]
+      const b = rank[y]
+      if (a !== b) return a === 4 ? 1 : b === 4 ? -1 : desc ? b - a : a - b
+      if (a >= 3) return 0
+      const k = compare(vals[x], vals[y])
+      return desc ? -k : k
     })
-    const changes: CellChange[] = []
-    sorted.forEach((src, i) => {
-      const r = range.r0 + i
-      for (let c = range.c0; c <= range.c1; c++) {
-        const k = c - range.c0
-        const key = r * MAX_COL + c
-        const nf = src.f[k] ? translateFormula(src.f[k]!, r - src.r, 0) : undefined
-        const e = src.cells[k]
-        changes.push({ key, prev: getEntry(d, r, c), prevF: d.formulas.get(key), next: e ? [e[0], nf ? '=' + nf : e[1], e[2]] : null, nextF: nf })
+    if (order.every((x, i) => x === i)) return { sheet, range }
+    // the formulas of the range as they are, and as they are in the rows they go to
+    const before: [number, string][] = []
+    const after: [number, string][] = []
+    const at = inverse(order)
+    for (let i = 0; i < n; i++) {
+      const row = d.rows[range.r0 + i]
+      if (!row) continue
+      for (let k = colAt(row, range.c0); k < row.length && (row[k] as number) <= range.c1; k += 4) {
+        const c = row[k] as number
+        const f = d.formulas.get((range.r0 + i) * MAX_COL + c)
+        if (f === undefined) continue
+        before.push([(range.r0 + i) * MAX_COL + c, f])
+        after.push([(range.r0 + at[i]) * MAX_COL + c, translateFormula(f, at[i] - i, 0)])
       }
+    }
+    const cm = this.sortComments(this.wb.sheets[sheet].path, range, at)
+    this.moveRows(d, range, order, before, after)
+    const ch: Change = { sheet, cells: [], range, sort: { order, before, after }, cm }
+    this.undoStack.push(ch)
+    if (this.undoStack.length > 200) this.undoStack.shift()
+    this.redoStack = []
+    if (before.length) this.formulaTouched = true
+    return { sheet, range, recalc: this.recalcAll() }
+  }
+
+  /**
+   * Row `i` of `range` takes the cells row `order[i]` has in the columns of the range (the cells beside them stay);
+   * the formulas of those cells are `drop` before and `put` after.
+   */
+  private moveRows(d: SheetData, range: Range, order: number[], drop: [number, string][], put: [number, string][]) {
+    const { r0, c0, c1 } = range
+    // the cells of each row in the columns of the range, as they are
+    const cut = (row: unknown[] | undefined): [number, number] => {
+      if (!row) return [0, 0]
+      const a = colAt(row, c0)
+      return [a, colAt(row, c1 + 1)]
+    }
+    const taken: unknown[][] = order.map((_, i) => {
+      const row = d.rows[r0 + i]
+      const [a, b] = cut(row)
+      return row ? row.slice(a, b) : []
     })
-    this.apply(d, changes, 'next')
-    return this.record(sheet, changes, range)
+    for (let i = 0; i < order.length; i++) {
+      const r = r0 + i
+      if (d.pages && !d.pages.has(r)) throw new Error('Row not in memory')
+      d.pages?.pin(r)
+      const row = d.rows[r]
+      const [a, b] = cut(row)
+      const next = row ? [...row.slice(0, a), ...taken[order[i]], ...row.slice(b)] : taken[order[i]].slice()
+      d.rows[r] = next.length ? next : undefined
+      d.rewrite.add(r)
+    }
+    for (const [key] of drop) d.formulas.delete(key)
+    for (const [key, f] of put) {
+      d.formulas.set(key, f)
+      // (a formula typed and not computed yet holds its own text: the text it has now)
+      const row = d.rows[Math.floor(key / MAX_COL)]
+      const k = row ? colAt(row, key % MAX_COL) : 0
+      if (row && row[k] === key % MAX_COL && row[k + 1] === T_STR && String(row[k + 2]).startsWith('=')) row[k + 2] = '=' + f
+    }
+  }
+
+  /** the comments on the cells a sort moves go with them (`at[i]`: where row `i` of the range goes) */
+  private sortComments(path: string, range: Range, at: number[]): Change['cm'] {
+    const store = this.wb.comments
+    const before: [string, DocComment | null][] = []
+    const after: [string, DocComment | null][] = []
+    for (const t of store.threads()) {
+      const a = t.root.at
+      if (!a || !('sheet' in a) || a.sheet !== path || a.r < range.r0 || a.r > range.r1 || a.c < range.c0 || a.c > range.c1) continue
+      const r = range.r0 + at[a.r - range.r0]
+      if (r === a.r) continue
+      const moved = { ...t.root, at: { ...a, r } }
+      before.push([t.root.id, t.root])
+      after.push([t.root.id, moved])
+    }
+    for (const [id, c] of after) store.set(id, c)
+    return before.length ? { before, after } : undefined
   }
 
   // ---------------------------------------------------------------- workbook (sheet list)
@@ -1559,6 +1650,7 @@ export class XlsxEditor {
     }
     const rowCols = new Map<number, Set<number>>()
     for (const r of d.dirtyRows) if (!rowCols.has(r)) rowCols.set(r, new Set())
+    for (const r of d.rewrite) if (!rowCols.has(r)) rowCols.set(r, new Set())
     // the cells edited, those whose shared formula lost its first cell, and those a formula gave another value
     for (const key of [...d.edited, ...fix.keys(), ...d.revalued]) {
       const r = Math.floor(key / MAX_COL)
@@ -1686,7 +1778,14 @@ function cellXml(d: SheetData, r: number, c: number, P: string, _wb: XlsxWorkboo
 }
 
 function needsWrite(d: SheetData): boolean {
-  return d.edited.size > 0 || d.structural || d.dirtyCols || d.dirtyMerges || d.dirtyView || d.dirtyRows.size > 0 || d.formulaChanged || d.revalued.size > 0
+  return d.edited.size > 0 || d.structural || d.dirtyCols || d.dirtyMerges || d.dirtyView || d.dirtyRows.size > 0 || d.formulaChanged || d.revalued.size > 0 || d.rewrite.size > 0
+}
+
+/** the order that puts back what `order` moved */
+function inverse(order: number[]): number[] {
+  const out = new Array<number>(order.length)
+  for (let i = 0; i < order.length; i++) out[order[i]] = i
+  return out
 }
 
 /** gives the cell of a file the value its formula has now (the formula, the format and the rest of it stay as they are) */
@@ -1800,8 +1899,16 @@ class RowPatcher {
     private sheetName: string,
   ) {}
 
+  /** the columns of the cells row `r` has in the model */
+  private modelCols(r: number): number[] {
+    const row = this.d.rows[r]
+    const cols: number[] = []
+    if (row) for (let k = 0; k < row.length; k += 4) cols.push(row[k] as number)
+    return cols
+  }
+
   private newRow(r: number): string {
-    const cols = [...(this.rowCols.get(r) ?? [])].sort((a, b) => a - b)
+    const cols = this.d.rewrite.has(r) ? this.modelCols(r) : [...(this.rowCols.get(r) ?? [])].sort((a, b) => a - b)
     const cells = cols.map((c) => cellXml(this.d, r, c, this.P, this.wb)).join('')
     const attrs = this.rowAttrXml(r)
     return cells || attrs ? `<${this.P}row r="${r + 1}"${attrs}>${cells}</${this.P}row>` : ''
@@ -2033,6 +2140,14 @@ class RowPatcher {
       setAttr(row, 'ht', a?.ht !== undefined ? String(a.ht) : undefined)
       setAttr(row, 'customHeight', a?.ht !== undefined ? '1' : undefined)
       setAttr(row, 'hidden', a?.hidden ? '1' : undefined)
+    }
+    if (this.d.rewrite.has(r)) {
+      // its cells moved as wholes: every cell is written from the model, what else the row holds stays
+      const cells = this.modelCols(r).map((c) => cellXml(this.d, r, c, P, this.wb)).join('')
+      row.c = row.c.filter((n) => !(isNode(n) && local(n.q) === 'c'))
+      if (cells) row.c.unshift(cells)
+      row.self = row.c.length === 0
+      return serialize(nodes)
     }
     const cols = [...(this.rowCols.get(r) ?? [])].sort((a, b) => a - b)
     // index existing cells by column (the cell read last of a column is the cell, as the reader has it)

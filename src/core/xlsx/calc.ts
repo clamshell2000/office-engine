@@ -5,7 +5,7 @@
 import { EvalSignal, evaluate, evaluateArray, FormulaError, isVolatile, parseFormula, references, UnsupportedFormula, type Ast, type CellProvider, type Value } from './formula'
 import { isoToSerial } from './formula/dates'
 import { expandShared } from './structure'
-import { MAX_COL, MAX_ROWS, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST, T_STR, type SheetData, type XlsxWorkbook } from './workbook'
+import { colAt, ownRow, MAX_COL, MAX_ROWS, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST, T_STR, type SheetData, type XlsxWorkbook } from './workbook'
 
 type Id = string // `${sheet}:${key}`
 const idOf = (sheet: number, key: number) => `${sheet}:${key}`
@@ -74,20 +74,6 @@ const MAX_FILL = 250_000
 const KEPT_COLS = 16
 /** cells kept in all, at most (8 bytes each and more) */
 const KEPT_CELLS = 4_000_000
-
-/** index in a row's entries (column, type, value, style: four slots each, by column) of the first at column `c` or after */
-function colAt(row: unknown[], c: number): number {
-  // (the first cells of a row are the ones read most)
-  if (!row.length || (row[0] as number) >= c) return 0
-  let lo = 0
-  let hi = row.length >> 2
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1
-    if ((row[mid << 2] as number) < c) lo = mid + 1
-    else hi = mid
-  }
-  return lo << 2
-}
 
 /** the formula `id` is too deep in the stack to compute now */
 class Deep extends EvalSignal {
@@ -663,7 +649,7 @@ function store(d: SheetData, key: number, v: Value): boolean {
   // a formula cell was edited: its page is in memory for good
   if (d.pages && !d.pages.has(r)) throw new Error('Row not in memory')
   d.pages?.pin(r)
-  let row = d.rows[r]
+  let row = ownRow(d, r)
   if (!row) d.rows[r] = row = []
   let t: number
   let val: unknown
