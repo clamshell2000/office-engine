@@ -98,7 +98,7 @@ export async function sheetPrintable(client: DocumentClient, sheet: number, l: S
       const cell = cells.get(c)
       const m = anchors.get(key(r, c))
       const [, raw = '', si = 0, kind = 0, color] = cell ?? []
-      const { textAlign, textRotate: _rot, alignItems, whiteSpace, ...rest } = (meta.styles[si] ?? {}) as Record<string, string | number>
+      const { textAlign, textRotate: _rot, shrinkToFit: _shrink, alignItems, whiteSpace, ...rest } = (meta.styles[si] ?? {}) as Record<string, string | number>
       // like the grid: fewer decimals or ### when a number does not fit
       const w = m ? l.colAxis.pos(Math.min(m.c1, lastC) + 1) - l.colAxis.pos(m.c0) : l.colAxis.size(c)
       const text = kind === 1 && raw ? fitNumber(raw, w - 6, fontPx(rest.fontSize, basePx)) : raw

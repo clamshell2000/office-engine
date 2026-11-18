@@ -10,6 +10,7 @@ export type PBookOp =
   | { op: 'rename'; path: string; name: string; was?: string }
   | { op: 'delete'; path: string }
   | { op: 'move'; path: string; to: number }
+  | { op: 'duplicate'; path: string }
 
 export type XOp =
   | { t: 'set'; id: string; sheet: string; cells: CellInput[] }

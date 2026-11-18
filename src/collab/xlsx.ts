@@ -108,6 +108,8 @@ export class XlsxCollab implements Adapter<XOp> {
         return { op: 'delete', path: this.path(b.index) }
       case 'move':
         return { op: 'move', path: this.path(b.from), to: b.to }
+      case 'duplicate':
+        return { op: 'duplicate', path: this.path(b.index) }
     }
   }
 

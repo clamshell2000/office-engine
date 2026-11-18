@@ -10,7 +10,7 @@ import {
   clone, el, escAttr, escText, relIdAttrs, getAttr, isNode, kidOf, kidsOf, local, parseRaw, prefixOf, rootEl, serialize, setAttr, setOrdered, textContent,
   type RChild, type RNode,
 } from '../raw'
-import { parseXml } from '../xml'
+import { decodeEntities, parseXml } from '../xml'
 import { BUILTIN_FORMATS, isDateFormat } from './numfmt'
 import { parseSheetStyles } from './styles'
 import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, RowAttrs, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
@@ -1616,6 +1616,34 @@ export class XlsxEditor {
         remap(order)
         break
       }
+      case 'duplicate': {
+        const src = sheets[op.index]
+        if (!src) throw new Error(`No sheet #${op.index}`)
+        if (this.wb.loaders.has(src.path)) throw new Error('A sheet that is still being imported cannot be duplicated yet')
+        // the sheet as it is now: its XML with the edits made here written in (what a save would write)
+        const sd = this.wb.sheetsData.get(op.index)
+        if (sd?.loading && !sd.done) await sd.loading
+        const source = sd && needsWrite(sd) ? await new Response(this.rewrite(src.path, sd)).text() : (this.newSheets.get(src.path) ?? (await pkg.text(src.path)))
+        const taken = new Set(listed.map((e) => (getAttr(e, 'name') ?? '').toLowerCase()))
+        let name = ''
+        for (let n = 2; !name || taken.has(name.toLowerCase()); n++) name = `${src.name.slice(0, 31 - ` (${n})`.length)} (${n})`
+        const xml = duplicateXml(source, src.name, name)
+        const path = pkg.freeName('xl/worksheets', 'sheet', 'xml')
+        this.newSheets.set(path, xml)
+        pkg.setPart(path, xml)
+        await pkg.setContentType(path, 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml')
+        const rid = await pkg.addRel(this.wb.mainPath, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet', path)
+        const ids = listed.map((e) => Number(getAttr(e, 'sheetId') ?? 0))
+        const node = el(P + 'sheet', { name, sheetId: String(Math.max(0, ...ids) + 1), ...relIdAttrs(root, 'id', rid) })
+        const at = sheetsEl.c.indexOf(entry(op.index)) + 1
+        sheetsEl.c.splice(at, 0, node)
+        sheetsEl.self = false
+        const order = sheets.map((_, i) => i)
+        sheets.push({ name, index: sheets.length, path, hidden: false })
+        order.splice(op.index + 1, 0, sheets.length - 1)
+        remap(order)
+        break
+      }
       case 'rename': {
         const old = sheets[op.index]
         const name = sheetName(op.name)
@@ -1812,6 +1840,24 @@ export class XlsxEditor {
  */
 function sheetName(raw: string): string {
   return raw.trim().slice(0, 31).replace(/[\\/?*[\]:]/g, '_').replace(/^'|'$/g, '_').trim()
+}
+
+/**
+ * The XML of a copy of a sheet: it keeps the cells, formats, widths and merges, and formulas that name the sheet
+ * itself name the copy. What a relationship of the original leads to (drawings, comments, tables, links) is left out:
+ * the copy has no relationships of its own, and a reference to one that is not there makes the file unreadable.
+ */
+function duplicateXml(xml: string, from: string, to: string): string {
+  const unesc = (s: string) => (s.indexOf('&') < 0 ? s : decodeEntities(s))
+  return xml
+    .replace(/<((?:\w+:)?)(drawing|legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|tableParts)\b(?:[^>]*\/>|[\s\S]*?<\/\1\2>)/g, '')
+    .replace(/<(?:\w+:)?hyperlink\b[^>]*\br:id="[^"]*"[^>]*\/>/g, '')
+    .replace(/(<(?:\w+:)?sheetView\b[^>]*?)\s+tabSelected="[^"]*"/, '$1')
+    .replace(/(<(?:\w+:)?(?:worksheet|sheetPr)\b[^>]*?)\s+(?:codeName|xr:uid)="[^"]*"/g, '$1')
+    .replace(/(<(?:\w+:)?f\b[^>]*>)([^<]+)(<\/(?:\w+:)?f>)/g, (m, a: string, f: string, b: string) => {
+      const g = renameSheetInFormula(unesc(f), from, to)
+      return g === unesc(f) ? m : a + escText(g) + b
+    })
 }
 
 /**
