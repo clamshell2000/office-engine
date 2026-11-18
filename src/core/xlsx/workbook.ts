@@ -396,6 +396,23 @@ export function stylesPartOf(pkg: OpcPackage, rels: Rels): string | undefined {
   return relOfType(rels, 'styles')?.target ?? (pkg.has(DEFAULT_STYLES_PART) ? DEFAULT_STYLES_PART : undefined)
 }
 
+/**
+ * What a cell is exported as (a CSV / TSV file holds text): the value as shown, except a number with no format
+ * (General), which keeps its digits (what is shown is rounded to the column's width), and a text another program
+ * would take for a formula (starting with = + - @, a tab or a return), which gets an apostrophe in front (CSV
+ * injection: OWASP). Numbers, dates and booleans are not texts: `-5` stays one.
+ */
+function csvField(c: CellOut, raw: number | undefined, numFmt: string | undefined): string {
+  const [, text, , kind] = c
+  if (kind === 0) return /^[=+\-@\t\r]/.test(text) ? `'${text}` : text
+  if (raw !== undefined && Number.isFinite(raw) && (!numFmt || numFmt.toLowerCase() === 'general')) {
+    // 15 significant digits are all a double keeps; the plain form, while it is short
+    const full = String(Number(raw.toPrecision(15)))
+    if (full.length <= 21 && !full.includes('e')) return full
+  }
+  return text
+}
+
 export class XlsxWorkbook {
   sheetsData = new Map<number, SheetData>()
   /** the comments (read in `open`) */
@@ -679,7 +696,8 @@ export class XlsxWorkbook {
     }
     // the text goes into Blobs every few MB: a Blob lives outside the heap (and on disk, when large), a string does not
     const blobs: Blob[] = []
-    let parts: string[] = [sep === ',' ? '\uFEFF' : '']
+    // a byte order mark first: Excel on Windows reads a file without one in the system's code page (every separator)
+    let parts: string[] = ['\uFEFF']
     let held = 0
     const step = d.pages?.size ?? 4096
     const blank = () => new Array<string>(lastC + 1).fill('')
@@ -691,7 +709,11 @@ export class XlsxWorkbook {
       for (const row of b.rows) {
         for (; next < row.r; next++) lines.push(blank())
         const line = blank()
-        for (const c of row.cells) if (c[0] <= lastC) line[c[0]] = c[1]
+        const raw = d.rows[row.r]
+        row.cells.forEach((c, i) => {
+          if (c[0] > lastC) return
+          line[c[0]] = csvField(c, raw?.[i * 4 + 1] === T_NUM && raw[i * 4] === c[0] ? (raw[i * 4 + 2] as number) : undefined, this.styles.xfs[c[2]]?.numFmt)
+        })
         lines.push(line)
         next++
       }
