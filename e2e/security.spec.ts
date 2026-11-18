@@ -4,6 +4,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { PROBE_HOST, probeDocx, probePptx, probeVisio, probeXlsx, scriptLinkDocx } from '../test/probes'
+import { plainToOffice } from '../src/core/plain'
 import { READY, useBrowser, viewer, type Viewer } from './harness'
 
 useBrowser()
@@ -109,5 +110,38 @@ describe('a crafted file', () => {
     await v.page.waitForTimeout(300)
     expect(v.ctx.pages().length).toBe(pages)
     expect(await v.page.evaluate(() => (window as unknown as { __ran?: number }).__ran)).toBeUndefined()
+  })
+
+  // "Open image in new tab" navigates to the <img>'s URL: for an SVG that must not be a same-origin document
+  const EVIL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" onload="document.title=\'ran:\'+(function(){try{return localStorage.getItem(\'secret\')}catch(e){return \'blocked\'}})()"><script>document.title="ran:"+(function(){try{return localStorage.getItem("secret")}catch(e){return "blocked"}})()</script><rect width="120" height="80" fill="red"/></svg>'
+
+  async function opensAsOpaque(v: Viewer, imgSelector: string) {
+    const img = v.page.locator(imgSelector).first()
+    await img.waitFor()
+    const src = (await img.getAttribute('src'))!
+    expect(src.startsWith('blob:')).toBe(false)
+    // what the browser does for the context menu entry: a new tab on the image's address
+    const origin = new URL(v.page.url()).origin
+    const tab = await v.ctx.newPage()
+    await tab.goto(origin + '/')
+    await tab.evaluate(() => localStorage.setItem('secret', 'host-data'))
+    await tab.goto(src).catch(() => {})
+    await tab.waitForFunction(() => document.title.startsWith('ran:'), null, { timeout: 5000 }).catch(() => {})
+    const title = await tab.title()
+    // the script may run, but not as the host: it sees nothing of the host's storage
+    expect(title).not.toContain('host-data')
+    expect(await tab.evaluate(() => location.origin)).not.toBe(origin)
+  }
+
+  test('an SVG file: its picture is not a same-origin document', async () => {
+    const v = await viewer({ src: 'samples/sample.docx' })
+    await openBytes(v, 'evil.svg', new Blob([EVIL_SVG], { type: 'image/svg+xml' }))
+    await opensAsOpaque(v, '[data-testid=de-picture] img')
+  })
+
+  test('an SVG picture in a docx: not a same-origin document', async () => {
+    const v = await viewer({ src: 'samples/sample.xlsx' })
+    await openBytes(v, 'evil.docx', await plainToOffice(EVIL_SVG, 'svg', 'evil.svg'))
+    await opensAsOpaque(v, '.de-page-inner img')
   })
 })

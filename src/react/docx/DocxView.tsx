@@ -530,11 +530,9 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
     download: !viewer.canDownload
       ? undefined
       : () => {
-          const el = imgEl()
-          if (!el?.src || !img) return
-          void fetch(el.src)
-            .then((r) => r.blob())
-            .then((b) => download(b, img.target.split('/').pop() ?? 'image'))
+          if (!img) return
+          // from the file, not from the page: an SVG is shown from a data: URL, which a host's content policy may not let be fetched
+          void (client.call('part', img.target) as Promise<Blob>).then((b) => download(b, img.target.split('/').pop() ?? 'image'))
         },
   }
 
