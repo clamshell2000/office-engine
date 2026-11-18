@@ -121,7 +121,8 @@ export const MATH: Record<string, FnDef> = {
   }),
   FACT: S(1, 1, ([x]) => {
     const n = Math.trunc(num(x))
-    if (n < 0) throw ERR.NUM
+    // 171! is past what a number holds: no need to count up to it (nor to 1E15)
+    if (n < 0 || n > 170) throw ERR.NUM
     let r = 1
     for (let i = 2; i <= n; i++) r *= i
     return finite(r)

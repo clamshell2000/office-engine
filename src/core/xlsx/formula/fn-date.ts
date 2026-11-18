@@ -68,10 +68,17 @@ function datedif(s: number, e: number, unit: string): number {
 function networkdays(s: number, e: number, holidays: Set<number>): number {
   const sign = s <= e ? 1 : -1
   const [lo, hi] = s <= e ? [s, e] : [e, s]
-  let n = 0
-  for (let d = lo; d <= hi; d++) {
+  // whole weeks by count, the days left one by one (never the span day by day: it can be as long as the numbers go)
+  const days = hi - lo + 1
+  let n = Math.floor(days / 7) * 5
+  for (let d = hi - (days % 7) + 1; d <= hi; d++) {
     const dow = serialToYmd(d).dow
-    if (dow !== 0 && dow !== 6 && !holidays.has(d)) n++
+    if (dow !== 0 && dow !== 6) n++
+  }
+  for (const h of holidays) {
+    if (h < lo || h > hi) continue
+    const dow = serialToYmd(h).dow
+    if (dow !== 0 && dow !== 6) n--
   }
   return sign * n
 }

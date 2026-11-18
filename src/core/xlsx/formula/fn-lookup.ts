@@ -1,5 +1,5 @@
 /** Lookup & reference functions. */
-import { A, flat, type Ev, type FnDef } from './fn'
+import { A, flat, lift, type Ev, type FnDef } from './fn'
 import { parseRefText } from './lexer'
 import type { RefAddr } from './refs'
 import { ERR, FormulaError, MAX_COL, MAX_ROW, type Value } from './types'
@@ -232,10 +232,11 @@ function dims(v: Val, rows: boolean): number {
 }
 
 export const LOOKUP: Record<string, FnDef> = {
-  VLOOKUP: A(3, 4, (a, ev) => vhlookup(a, ev, true)),
-  HLOOKUP: A(3, 4, (a, ev) => vhlookup(a, ev, false)),
-  XLOOKUP: A(3, 6, xlookup),
-  MATCH: A(2, 3, match),
+  // the value looked up, and the column / row to give: one result each when they are arrays
+  VLOOKUP: A(3, 4, lift((i) => i === 0 || i === 2, (a, ev) => vhlookup(a, ev, true))),
+  HLOOKUP: A(3, 4, lift((i) => i === 0 || i === 2, (a, ev) => vhlookup(a, ev, false))),
+  XLOOKUP: A(3, 6, lift((i) => i === 0, xlookup)),
+  MATCH: A(2, 3, lift((i) => i === 0, match)),
   LOOKUP: A(2, 3, lookup),
   INDEX: A(2, 4, index),
   OFFSET: A(3, 5, offset),
