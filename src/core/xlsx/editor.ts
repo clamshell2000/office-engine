@@ -1788,14 +1788,16 @@ class RowPatcher {
       setAttr(row, 'hidden', a?.hidden ? '1' : undefined)
     }
     const cols = [...(this.rowCols.get(r) ?? [])].sort((a, b) => a - b)
-    // index existing cells by column
+    // index existing cells by column (the cell read last of a column is the cell, as the reader has it)
     const pos = new Map<number, number>()
     let prev = -1
+    let unordered = false
     row.c.forEach((n, i) => {
       if (!isNode(n) || local(n.q) !== 'c') return
       const ref = getAttr(n, 'r')
       const c = ref ? parseRef(ref)[1] : prev + 1
-      prev = c
+      if (c <= prev) unordered = true
+      prev = Math.max(prev, c)
       pos.set(c, i)
     })
     const replacements = new Map<number, RChild>()
@@ -1823,6 +1825,15 @@ class RowPatcher {
       }
     }
     for (const [i, x] of replacements) row.c[i] = x
+    if (unordered) {
+      // The file has the cells of this row out of column order, or a column twice (this engine wrote such rows before
+      // 0.15.0): the row is written in order, each cell once, with the new ones in their place.
+      const cells: [number, RChild][] = [...pos].map(([c, i]) => [c, row.c[i]])
+      for (const ins of inserts) cells.push([ins.c, ins.node])
+      row.c = cells.sort((a, b) => a[0] - b[0]).map((x) => x[1])
+      row.self = row.c.length === 0
+      return serialize(nodes)
+    }
     if (inserts.length) {
       // place new cells before the first existing cell with a greater column, in column order (cells out of order are not a workbook)
       const ordered = [...pos.entries()].sort((a, b) => a[0] - b[0])

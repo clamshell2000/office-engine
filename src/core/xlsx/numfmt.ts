@@ -1,6 +1,6 @@
 /** Excel number-format subset: General, fixed/grouped/percent/scientific/fraction, dates & times, sections & colors. */
 import { dict } from '../dict'
-import { pickSection } from './formula/format'
+import { fixedDecimal, pickSection } from './formula/format'
 
 export const BUILTIN_FORMATS: Record<number, string> = {
   0: 'General', 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 11: '0.00E+00',
@@ -197,23 +197,6 @@ export function formatGeneral(v: number): string {
 
 function group(intStr: string): string {
   return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-}
-
-/** Round a nonnegative value's 15 significant decimal digits without returning to binary. */
-function fixedDecimal(v: number, decimals: number): string {
-  if (!Number.isFinite(v)) return String(v)
-  const [mantissa, exponent] = v.toExponential(14).split('e')
-  let coefficient = BigInt(mantissa.replace('.', ''))
-  const shift = Number(exponent) - 14 + decimals
-  let digits: string
-  if (shift >= 0) digits = coefficient.toString() + '0'.repeat(shift)
-  else {
-    const divisor = 10n ** BigInt(-shift)
-    coefficient = (coefficient + divisor / 2n) / divisor
-    digits = coefficient.toString()
-  }
-  digits = digits.padStart(decimals + 1, '0')
-  return decimals ? digits.slice(0, -decimals) + '.' + digits.slice(-decimals) : digits
 }
 
 function formatNumber(v: number, sec: Section): string {

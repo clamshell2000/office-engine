@@ -14,6 +14,16 @@ export function ooxmlNumber(value: string | undefined, min: number, max: number)
   return Number.isFinite(n) && n >= min && n <= max ? n : undefined
 }
 
+/**
+ * A size of the file, at most `max`: a width or a height past what Excel allows is the largest it allows (other
+ * programs write them, and show them). Undefined when it is no number, or under `min`.
+ */
+export function ooxmlCapped(value: string | undefined, min: number, max: number): number | undefined {
+  if (value === undefined || !value.trim()) return undefined
+  const n = Number(value)
+  return Number.isFinite(n) && n >= min ? Math.min(max, n) : undefined
+}
+
 export function ooxmlInt(value: string | undefined, min: number, max: number): number | undefined {
   const n = ooxmlNumber(value, min, max)
   return Number.isSafeInteger(n) ? n : undefined

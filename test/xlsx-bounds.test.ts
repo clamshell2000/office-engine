@@ -67,7 +67,8 @@ test('worksheet dimensions, column records, merges, and sizes cannot bypass coor
     '<row r="3" ht="409.5"/><row r="4" hidden="1"/><row r="5" ht="0"/></sheetData>' +
     `<mergeCells>${invalidMerges}<mergeCell ref="$A$1:$B$2"/><mergeCell ref="XFC1048575:XFD1048576"/></mergeCells>`,
   )
-  expect(d.colInfo).toEqual([{ min: MAX_COL - 1, max: MAX_COL - 1, w: 1785 }, { min: 1, max: 2, w: 0 }])
+  // columns past the last one and a width past the largest are kept as far as the sheet goes, not dropped
+  expect(d.colInfo).toEqual([{ min: 0, max: MAX_COL - 1, w: 70 }, { min: 0, max: 3, w: 1785 }, { min: MAX_COL - 1, max: MAX_COL - 1, w: 1785 }, { min: 1, max: 2, w: 0 }])
   expect(d.merges).toEqual([{ r0: 0, c0: 0, r1: 1, c1: 1 }, { r0: MAX_ROWS - 2, c0: MAX_COL - 2, r1: MAX_ROWS - 1, c1: MAX_COL - 1 }])
   expect(d.defaultRowH).toBe(20)
   expect(d.defaultColW).toBe(64)

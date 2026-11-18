@@ -869,3 +869,47 @@ describe('xlsx: a sheet with a formula per row', () => {
     expect(await o.shown(0, 30_000, 4)).toBe('6')
   }, 30000)
 })
+
+describe('xlsx: files written loosely are read without losing cells (PR25-002, -003, -004)', () => {
+  test('a cell whose reference names another row, or has leading zeros, is kept; cells out of order are put in order', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'S', rows: '<row r="2"><c r="A3"><v>33</v></c><c r="B2"><v>22</v></c></row><row r="3"><c r="A03"><v>2</v></c></row><row r="4"><c r="D4"><v>4</v></c><c r="B4"><v>2</v></c><c r="C4"><f>B4+1</f><v>3</v></c><c r="B4"><v>20</v></c></row>' }] }))
+    expect(await o.shown(0, 1, 0)).toBe('33')
+    expect(await o.shown(0, 1, 1)).toBe('22')
+    expect(await o.shown(0, 2, 0)).toBe('2')
+    // row 4 as B, C, D: an edit finds each cell once
+    const b: any = await o.engine.call('xlsx.block', [0, 3, 4])
+    expect(b.rows[0].cells.map((c: any) => [c[0], c[1]])).toEqual([[1, '20'], [2, '3'], [3, '4']])
+    await o.set(0, 'B4', '5')
+    await o.set(0, 'A4', '1')
+    expect(await o.shown(0, 3, 2)).toBe('6')
+    const xml = await (await o.save()).text('xl/worksheets/sheet1.xml')
+    expect([...xml.matchAll(/<c r="([A-Z]+4)"/g)].map((m) => m[1])).toEqual(['A4', 'B4', 'C4', 'D4'])
+  })
+
+  test('a column record past the last column, a width or a height past the largest: kept, as large as allowed', async () => {
+    const o = await openBook(await book({ sheets: [{ name: 'S', head: '<cols><col min="2" max="16385" width="20" hidden="1"/><col min="1" max="1" width="300"/></cols>', rows: '<row r="1" ht="500"><c r="A1"><v>1</v></c></row>' }] }))
+    const p = o.events.filter((e) => e.event === 'xlsx:progress').map((e) => e.data)
+    expect(p.find((x) => x.colInfo)?.colInfo).toEqual([{ min: 1, max: 16383, w: 0 }, { min: 0, max: 0, w: 1785 }])
+    expect(p.flatMap((x) => x.rowSizes)).toContainEqual([0, 546])
+  })
+})
+
+describe('xlsx: TEXT() shows a number as its cell does (PR24-001)', () => {
+  test('large numbers keep their digits', async () => {
+    const { evaluateFormula } = await import('../src/core/xlsx/formula')
+    const text = (f: string) => evaluateFormula(f, { provider: { value: () => null }, r: 0, c: 0 })
+    expect(text('TEXT(1E+21,"0.00")')).toBe('1000000000000000000000.00')
+    expect(text('TEXT(1E+21,"#,##0.00")')).toBe('1,000,000,000,000,000,000,000.00')
+    expect(text('TEXT(1E+21,"0%")')).toBe('100000000000000000000000%')
+    expect(text('TEXT(9.995E+20,"0%")')).toBe('99950000000000000000000%')
+    expect(text('TEXT(770467519760130,"0.00")')).toBe('770467519760130.00')
+    // as before for the numbers of every day
+    expect(text('TEXT(1234.5678,"#,##0.00")')).toBe('1,234.57')
+    expect(text('TEXT(2.675,"0.00")')).toBe('2.68')
+    expect(text('TEXT(-0.004,"0.00")')).toBe('0.00')
+    expect(text('TEXT(-1.5,"0.0")')).toBe('-1.5')
+    expect(text('TEXT(0.256,"0.0%")')).toBe('25.6%')
+    expect(text('TEXT(5,"000")')).toBe('005')
+    expect(text('TEXT(0.5,"#.##")')).toBe('.5')
+  })
+})

@@ -82,6 +82,16 @@ test('a drawing is placed by its cells, so it moves and grows with them', () => 
   expect(drawingExtent([d, { kind: 'chart', title: '', at: { x: 0, y: 600 }, size: { w: 80, h: 40 } }], new Axis(64), new Axis(20))).toEqual({ rows: 33, cols: 5 })
 })
 
+test('an anchor corner without its offsets is at the cell\'s own corner', async () => {
+  const bare = (name: string, c: number, r: number) => `<xdr:${name}><xdr:col>${c}</xdr:col><xdr:row>${r}</xdr:row></xdr:${name}>`
+  const engine = new Engine(() => {})
+  await engine.open(await withDrawings(`<xdr:twoCellAnchor>${bare('from', 1, 1)}${bare('to', 3, 6)}${pic('rId1', 'loose')}</xdr:twoCellAnchor>`), {})
+  const list = await engine.call('xlsx.drawings', [0]) as SheetDrawing[]
+  expect(list).toHaveLength(1)
+  expect(list[0].from).toEqual({ c: 1, r: 1, dx: 0, dy: 0 })
+  expect(list[0].to).toEqual({ c: 3, r: 6, dx: 0, dy: 0 })
+})
+
 test('invalid drawing coordinates discard the anchor without stretching the sheet', async () => {
   const two = (from: string, to = corner('to', 2, 3)) => `<xdr:twoCellAnchor>${from}${to}${pic('rId1', 'bad')}</xdr:twoCellAnchor>`
   const invalid: string[] = []

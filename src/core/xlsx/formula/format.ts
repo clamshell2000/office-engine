@@ -14,6 +14,23 @@ export function roundHalf(x: number, d: number): number {
   return x < 0 ? -r : r
 }
 
+/** Round a nonnegative value's 15 significant decimal digits without returning to binary. */
+export function fixedDecimal(v: number, decimals: number): string {
+  if (!Number.isFinite(v)) return String(v)
+  const [mantissa, exponent] = v.toExponential(14).split('e')
+  let coefficient = BigInt(mantissa.replace('.', ''))
+  const shift = Number(exponent) - 14 + decimals
+  let digits: string
+  if (shift >= 0) digits = coefficient.toString() + '0'.repeat(shift)
+  else {
+    const divisor = 10n ** BigInt(-shift)
+    coefficient = (coefficient + divisor / 2n) / divisor
+    digits = coefficient.toString()
+  }
+  digits = digits.padStart(decimals + 1, '0')
+  return decimals ? digits.slice(0, -decimals) + '.' + digits.slice(-decimals) : digits
+}
+
 /**
  * Index of the format section Excel applies to n: the second for negatives, the third for zero,
  * otherwise the first. An empty second section falls back to the first, but an empty third section
@@ -67,14 +84,15 @@ function formatNumber(x: number, sec: string, signed: boolean): string {
   const decs = (dp.match(/[0#?]/g) ?? []).length
   const minDec = (dp.match(/[0?]/g) ?? []).length
   const minInt = (ip.match(/[0?]/g) ?? []).length
-  const r = roundHalf(Math.abs(v), decs)
-  let [is, ds = ''] = r.toFixed(decs).split('.')
+  // the digits as a cell shows them (15 significant ones, no way back through a double: 1E+21 is not 999999999999999868928)
+  const fixed = fixedDecimal(Math.abs(v), decs)
+  let [is, ds = ''] = fixed.split('.')
   if (is === '0' && minInt === 0) is = ''
   is = is.padStart(minInt, '0')
   if (ip.includes(',')) is = is.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   while (ds.length > minDec && ds.endsWith('0')) ds = ds.slice(0, -1)
   const body = p === '' ? '' : is + (dot >= 0 ? `.${ds}` : '')
-  const neg = signed && v < 0 && r !== 0
+  const neg = signed && v < 0 && /[1-9]/.test(fixed)
   return (neg ? '-' : '') + prefix + body + suffix
 }
 

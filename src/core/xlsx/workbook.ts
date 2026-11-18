@@ -10,7 +10,7 @@ import { parseSheetStyles, type SheetStyles } from './styles'
 import { expandShared, formulaAt } from './structure'
 import { stripFunctionPrefixes } from './formula'
 import type { Shift } from './follow'
-import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlInt, ooxmlNumber } from './limits'
+import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlCapped, ooxmlInt, ooxmlNumber } from './limits'
 import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
 
 export const T_NUM = 0
@@ -62,7 +62,8 @@ export function parseRange(ref: string): Merge | undefined {
 
 /** Validate file coordinates here, without restricting parseRef/parseRange used by CSV and editing. */
 function worksheetRef(ref: string): [number, number] | undefined {
-  if (!/^\$?[A-Z]{1,3}\$?[1-9][0-9]{0,6}$/.test(ref)) return undefined
+  // (a row number may come with leading zeros: A02)
+  if (!/^\$?[A-Z]{1,3}\$?0*[1-9][0-9]{0,6}$/.test(ref)) return undefined
   const [r, c] = parseRef(ref.replace(/\$/g, ''))
   return r < MAX_ROWS && c < MAX_COL ? [r, c] : undefined
 }
@@ -136,6 +137,9 @@ class SheetHandler implements SaxHandler {
   headerReady = false
   private rowHasHt = false
   private rowMaxPt = 0
+  /** last column of the row so far, and whether a cell came before it (a row is kept in column order, one cell per column) */
+  private rowLast = -1
+  private rowUnordered = false
 
   /** fontPt: font size per cell format, used to auto-grow rows without explicit height */
   constructor(private d: SheetData, private fontPt: number[] = [], private basePt = 11) {}
@@ -146,7 +150,9 @@ class SheetHandler implements SaxHandler {
         if (!this.rowCells) return true
         const r = a.r
         const ref = r === undefined ? [this.row, this.col + 1] : worksheetRef(r)
-        if (!ref || ref[0] !== this.row || ref[1] >= MAX_COL) return true
+        // A reference naming another row than the one the cell is in (a file written wrong): the cell is kept, in the
+        // row it is in, at the column named. Dropping it would lose its value.
+        if (!ref || ref[1] >= MAX_COL) return true
         this.col = ref[1]
         this.cType = a.t ?? ''
         this.cStyle = a.s ? Number(a.s) : 0
@@ -180,9 +186,12 @@ class SheetHandler implements SaxHandler {
         if (row < 0 || row >= MAX_ROWS) return true
         this.row = row
         this.col = -1
+        this.rowLast = -1
+        this.rowUnordered = false
         this.rowCells = []
         const hidden = a.hidden === '1' || a.hidden === 'true'
-        const ht = ooxmlNumber(a.ht, 0, MAX_ROW_HEIGHT_PT)
+        // (a height past Excel's largest: the largest, not the default)
+        const ht = ooxmlCapped(a.ht, 0, MAX_ROW_HEIGHT_PT)
         if (hidden || ht !== undefined) this.d.rowAttrs.set(this.row, { ht, hidden: hidden || undefined })
         this.rowHasHt = hidden || ht !== undefined
         this.rowMaxPt = 0
@@ -204,12 +213,13 @@ class SheetHandler implements SaxHandler {
       }
       case 'col': {
         const first = ooxmlInt(a.min, 1, MAX_COL)
-        const last = ooxmlInt(a.max, 1, MAX_COL)
+        const last = ooxmlInt(a.max, 1, Number.MAX_SAFE_INTEGER)
         if (first === undefined || last === undefined || first > last) return
         const min = first - 1
-        const max = last - 1
+        // columns past the last one, a width past the largest: kept as far as the sheet goes (the record may also say hidden)
+        const max = Math.min(last, MAX_COL) - 1
         const hidden = a.hidden === '1' || a.hidden === 'true'
-        const width = ooxmlNumber(a.width, 0, MAX_COL_WIDTH)
+        const width = ooxmlCapped(a.width, 0, MAX_COL_WIDTH)
         if (a.width !== undefined && width === undefined) return
         const w = hidden ? 0 : width !== undefined ? Math.round(width * 7) : this.d.defaultColW
         this.d.colInfo.push({ min, max, w })
@@ -258,8 +268,13 @@ class SheetHandler implements SaxHandler {
         if (!cells) return
         const c = this.col
         if (c > this.d.maxCol) this.d.maxCol = c
+        const again = c <= this.rowLast
+        if (again) this.rowUnordered = true
+        else this.rowLast = c
         const key = this.row * MAX_COL + c
         if (this.formula) this.d.formulas.set(key, this.formula)
+        // (a column read twice: the cell read last is the cell, with its formula or without)
+        else if (again) this.d.formulas.delete(key)
         if (this.fArray) {
           const rg = this.formula ? parseRange(this.fArray) : undefined
           if (rg && rg.r0 >= 0 && rg.c0 >= 0 && rg.r1 >= rg.r0 && rg.c1 >= rg.c0 && rg.r1 < MAX_ROWS && rg.c1 < MAX_COL) this.d.arrays.set(key, rg)
@@ -324,6 +339,7 @@ class SheetHandler implements SaxHandler {
             this.d.autoRowH.set(this.row, px)
           }
         }
+        if (this.rowCells && this.rowUnordered) this.rowCells = ordered(this.rowCells)
         if (this.rowCells && this.rowCells.length) this.d.rows[this.row] = this.rowCells
         if (this.row > this.d.maxRow) this.d.maxRow = this.row
         this.rowCells = null
@@ -336,6 +352,18 @@ class SheetHandler implements SaxHandler {
     else if (this.capture === 2) this.formula += t
     else if (this.capture === 3) this.val += t
   }
+}
+
+/**
+ * The cells of a row in column order, the last one read of a column winning. Files hold them out of order (this
+ * engine wrote such rows before 0.15.0), and what edits a row relies on the order.
+ */
+function ordered(cells: unknown[]): unknown[] {
+  const at = new Map<number, number>()
+  for (let k = 0; k < cells.length; k += 4) at.set(cells[k] as number, k)
+  const out: unknown[] = []
+  for (const k of [...at.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1])) out.push(cells[k], cells[k + 1], cells[k + 2], cells[k + 3])
+  return out
 }
 
 class SstHandler implements SaxHandler {

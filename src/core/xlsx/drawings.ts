@@ -59,8 +59,10 @@ function corner(el: XEl | undefined): DrawingCorner | undefined {
   if (!el) return undefined
   const c = ooxmlInt(textOf(kid(el, 'col')), 0, MAX_COL - 1)
   const r = ooxmlInt(textOf(kid(el, 'row')), 0, MAX_ROWS - 1)
-  const dx = emu(textOf(kid(el, 'colOff')), MAX_SHEET_WIDTH_PX, true)
-  const dy = emu(textOf(kid(el, 'rowOff')), MAX_SHEET_HEIGHT_PX, true)
+  // an offset left out is none: the corner is at the cell's own (a wrong one still discards the anchor)
+  const off = (name: string, max: number) => (kid(el, name) ? emu(textOf(kid(el, name)), max, true) : 0)
+  const dx = off('colOff', MAX_SHEET_WIDTH_PX)
+  const dy = off('rowOff', MAX_SHEET_HEIGHT_PX)
   if (c === undefined || r === undefined || dx === undefined || dy === undefined) return undefined
   return { c, r, dx, dy }
 }
