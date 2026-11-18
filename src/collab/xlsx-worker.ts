@@ -52,6 +52,9 @@ export class XlsxCollabWorker {
 
   async apply(op: XOp): Promise<{ res: XlsxEditResult | null; rec: number | null }> {
     const styles = await this.ed.styleMark()
+    // What the editor recorded before is not this operation's (edits made before the room was joined; an operation
+    // that changes nothing records nothing): reverting it would undo those instead.
+    this.ed.takeRecord()
     let res: XlsxEditResult | null
     try {
       res = await this.run(op)
