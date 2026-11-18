@@ -25,6 +25,9 @@ value of that mode. Names are camelCase (`accentHover` sets `--de-accent-hover`)
 point at the host's own variables: `{ accent: 'var(--brand-500)' }`. `createTheme()` types a theme object written apart
 from the prop, and `THEME_TOKENS` lists every token.
 
+Treat token values as trusted application configuration: they are passed through as CSS without validation. Validate
+externally supplied values before passing them to the viewer, including when rendering on the server (SSR).
+
 `mount()` takes the same `theme` option; `<office-viewer theme="dark">` takes a mode.
 
 ## Plain CSS
