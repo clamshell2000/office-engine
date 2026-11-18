@@ -102,6 +102,22 @@ describe('docx editing', () => {
     expect(p.marker?.text).toMatch(/^1[.)]$/)
   })
 
+  test('removing bullets refreshes the toolbar without reselection (#19)', async () => {
+    const v = await open()
+    await v.selectText('document')
+    const bullets = v.btn('Bulleted list')
+    const active = v.page.locator('button[aria-label^="Bulleted list"][aria-pressed="true"]')
+    await bullets.click()
+    await active.waitFor()
+    await bullets.click()
+    await active.waitFor({ state: 'hidden' })
+    expect(await bullets.getAttribute('aria-pressed')).toBe('false')
+    const p = (await docxParas((await v.save()).bytes)).find((x) => paraText(x).startsWith('This document'))!
+    expect(p.lst).toBeUndefined()
+    expect(p.marker).toBeUndefined()
+    expect(v.errors).toEqual([])
+  })
+
   test('text and highlight colors', async () => {
     const v = await open()
     await v.selectText('document')
