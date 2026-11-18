@@ -996,13 +996,20 @@ export class XlsxEditor {
   /** sets the cells / layout touched by `ch` to its `which` state, recorded as a new change */
   restoreRecord(ch: Change, which: 'prev' | 'next'): XlsxEditResult {
     const d = this.sheet(ch.sheet)
-    const cells: CellChange[] = ch.cells.map((c) => ({
-      key: c.key,
-      prev: getEntry(d, Math.floor(c.key / MAX_COL), c.key % MAX_COL),
-      prevF: d.formulas.get(c.key),
-      next: which === 'prev' ? c.prev : c.next,
-      nextF: which === 'prev' ? c.prevF : c.nextF,
-    }))
+    // Only the cells that still hold what this change left in them: one somebody changed since is theirs (undoing
+    // a change of one's own does not take away what others typed after it).
+    const cells: CellChange[] = []
+    for (const c of ch.cells) {
+      const cur = getEntry(d, Math.floor(c.key / MAX_COL), c.key % MAX_COL)
+      const curF = d.formulas.get(c.key)
+      const [left, leftF] = which === 'prev' ? [c.next, c.nextF] : [c.prev, c.prevF]
+      const same = curF !== undefined || leftF !== undefined ? curF === leftF : (cur?.[0] ?? T_EMPTY) === (left?.[0] ?? T_EMPTY) && (cur?.[1] ?? '') === (left?.[1] ?? '')
+      if (!same) continue
+      const to = which === 'prev' ? c.prev : c.next
+      // (a format given to the cell since stays)
+      const next: Entry | null = to && cur && left && cur[2] !== left[2] ? [to[0], to[1], cur[2]] : !to && cur && left && cur[2] !== left[2] ? [T_EMPTY, '', cur[2]] : to
+      cells.push({ key: c.key, prev: cur, prevF: curF, next, nextF: which === 'prev' ? c.prevF : c.nextF })
+    }
     const counter: Change = {
       sheet: ch.sheet,
       cells,
