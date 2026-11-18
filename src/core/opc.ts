@@ -96,6 +96,17 @@ export class OpcPackage {
     return this.changes.size > 0
   }
 
+  /** paths of the parts the package holds now (those added in this session with them, those deleted without) */
+  paths(): string[] {
+    const out = new Map<string, string>()
+    for (const e of this.zip.list()) out.set(normalize(e.name), e.name)
+    for (const [k, ch] of this.changes) {
+      if (ch.data === null) out.delete(k)
+      else out.set(k, ch.path)
+    }
+    return [...out.values()]
+  }
+
   /** Current text of a part (edited version if any). */
   async text(path: string): Promise<string> {
     const ch = this.changes.get(normalize(path))
@@ -148,6 +159,7 @@ export class OpcPackage {
 
   /** Builds the edited package; unchanged entries are copied without recompression. `type`: of a plain document of its kind. */
   async save(type: string): Promise<Blob> {
+    type = (await this.flavor())?.mime ?? type
     const m = new Map<string, PartData | null>()
     for (const { path, data } of this.changes.values()) m.set(path, data)
     return rebuildZip(this.zip, m, type)
@@ -159,7 +171,6 @@ export class OpcPackage {
     const nodes = this.has(rp)
       ? parseRaw(await this.text(rp))
       : parseRaw('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
-    type = (await this.flavor())?.mime ?? type
     const root = rootEl(nodes)!
     const ids = new Set(kidsOf(root, 'Relationship').map((r) => getAttr(r, 'Id')))
     let n = ids.size + 1
@@ -288,16 +299,6 @@ export class OpcPackage {
   }
 }
 
-export function relOfType(rels: Rels, suffix: string): Rel | undefined {
-  for (const r of rels.values()) if (r.type.endsWith('/' + suffix)) return r
-  return undefined
-}
-
-export function relsOfType(rels: Rels, suffix: string): Rel[] {
-  return [...rels.values()].filter((r) => r.type.endsWith('/' + suffix))
-}
-
-const SKIP_EXT = new Set(['extLst'])
 /** the formats other than the plain document (docx, xlsx, pptx), by the content type of the main part: extension, media type */
 const FLAVORS: Record<string, [string, string]> = {
   'application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml': ['dotx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.template'],
@@ -313,3 +314,13 @@ const FLAVORS: Record<string, [string, string]> = {
   'application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml': ['ppsm', 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12'],
 }
 
+export function relOfType(rels: Rels, suffix: string): Rel | undefined {
+  for (const r of rels.values()) if (r.type.endsWith('/' + suffix)) return r
+  return undefined
+}
+
+export function relsOfType(rels: Rels, suffix: string): Rel[] {
+  return [...rels.values()].filter((r) => r.type.endsWith('/' + suffix))
+}
+
+const SKIP_EXT = new Set(['extLst'])

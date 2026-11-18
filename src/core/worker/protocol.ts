@@ -6,7 +6,7 @@ import type { XOp } from '../../collab/xlsx-ops'
 import type { POp } from '../../collab/pptx-ops'
 import type { PptxCollabResult } from '../../collab/pptx-worker'
 import type { CanonStyle, DocxMeta, Block, EditOp, EditResult, HFSet, HFSetResult, PageSet, PageSetResult, ParaSpec, StyleInfo, StyleLook, StyleSetResult, TableOp } from '../docx/types'
-import type { BlockOut, BookOp, CellDetail, CellInput, FindMatch, FindOptions, FmtPatch, Range, SheetOp, SheetProgress, WorkbookMeta, XlsxEditResult } from '../xlsx/types'
+import type { BlockOut, BookOp, CellDetail, CellInput, FindMatch, FindOptions, FmtPatch, Range, SheetOp, SheetProgress, WorkbookMeta, XlsxClip, XlsxEditResult } from '../xlsx/types'
 import type { SheetDrawing } from '../xlsx/drawings'
 import type { PParaSpec, PresentationMeta, ShapeOp, SlideModel, SlideOp } from '../pptx/types'
 
@@ -85,6 +85,10 @@ export interface Methods {
   /** replaces text in matching cells (or only `at`); null when nothing changed */
   'xlsx.replace'(sheet: number, query: string, by: string, opts?: FindOptions, at?: { r: number; c: number }): XlsxEditResult | null
   'xlsx.set'(sheet: number, cells: CellInput[]): XlsxEditResult
+  /** the block of filled cells a range is part of (the table around it), and whether its first row reads as a header */
+  'xlsx.region'(sheet: number, range: Range): { range: Range; header: boolean }
+  /** the cells of a range as they are (values, formulas, formats) for the `paste` sheet operation, and as text for the clipboard; rows not shown yet included */
+  'xlsx.copy'(sheet: number, range: Range): XlsxClip
   'xlsx.format'(sheet: number, range: Range, patch: FmtPatch): XlsxEditResult
   'xlsx.sheetOp'(sheet: number, op: SheetOp): XlsxEditResult
   'xlsx.bookOp'(op: BookOp): XlsxEditResult

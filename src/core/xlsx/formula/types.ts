@@ -51,7 +51,22 @@ export interface EvalContext {
   /** 0-based position of the formula cell */
   r: number
   c: number
+  /**
+   * A function the engine does not have, or a defined name, stops the evaluation with an `UnsupportedFormula` thrown
+   * (the caller keeps the value it has), where it otherwise evaluates to #NAME? (which IFERROR and the like take
+   * for an error of the data, and hide).
+   */
+  strict?: boolean
 }
+
+/**
+ * Thrown through an evaluation, by the provider or the evaluator, to stop it: never turned into a value (no function
+ * catches it, `evaluate` lets it out).
+ */
+export class EvalSignal extends Error {}
+
+/** the formula uses what the engine cannot compute: a function it does not have, a defined name */
+export class UnsupportedFormula extends EvalSignal {}
 
 export const MAX_ROW = 1048575
 export const MAX_COL = 16383

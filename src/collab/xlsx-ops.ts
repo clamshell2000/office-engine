@@ -68,9 +68,18 @@ function shiftSheetOp(op: SheetOp, axis: 'row' | 'col', at: number, n: number): 
     }
     case 'merge':
     case 'unmerge':
+    case 'clear':
     case 'fill': {
       const range = shiftRange(op.range, axis, at, n)
       return range ? { ...op, range } : null
+    }
+    case 'paste': {
+      // the cells go where their top left cell went (they keep their shape)
+      const r = axis === 'row' ? shiftIdx(op.range.r0, at, n) : op.range.r0
+      const c = axis === 'col' ? shiftIdx(op.range.c0, at, n) : op.range.c0
+      if (r === null || c === null) return null
+      if (r === op.range.r0 && c === op.range.c0) return op
+      return { ...op, range: { r0: r, c0: c, r1: r + (op.range.r1 - op.range.r0), c1: c + (op.range.c1 - op.range.c0) } }
     }
     case 'sort': {
       const range = shiftRange(op.range, axis, at, n)
@@ -154,6 +163,9 @@ const ALL: Range = { r0: 0, c0: 0, r1: Number.MAX_SAFE_INTEGER, c1: Number.MAX_S
 /** a cell edit that enters text with line breaks: the cell is set to wrap (derived style) and its row grows */
 const multiline = (op: XOp) => op.t === 'set' && op.cells.some((c) => c.input.includes('\n'))
 
+/** a cell edit that may give its cell a number format (derived style): a date or a percentage typed into a cell without one */
+const formats = (op: XOp) => op.t === 'set' && op.cells.some((c) => /%\s*$|^\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}/.test(c.input))
+
 export function footprint(op: XOp): { sheet: string; range: Range } | null {
   switch (op.t) {
     case 'set': {
@@ -198,7 +210,7 @@ export function conflictsX(pending: XOp[], remote: XOp[]): boolean {
   if (remote.some((o) => o.t === 'comment' && cids.has(o.cid))) return true
   if (pending.some((o) => o.t === 'revert' || isStructural(o))) return true
   // derived styles are appended to one table: keep its order identical everywhere
-  const styles = (o: XOp) => (o.t === 'fmt' && o.patch.xf === undefined && !o.patch.clear) || multiline(o)
+  const styles = (o: XOp) => (o.t === 'fmt' && o.patch.xf === undefined && !o.patch.clear) || multiline(o) || formats(o)
   if (pending.some(styles) && remote.some(styles)) return true
   const fp = remote.map(footprint)
   return pending.some((p) => {

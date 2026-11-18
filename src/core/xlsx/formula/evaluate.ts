@@ -5,7 +5,7 @@ import { FUNCTIONS } from './functions'
 import { FormulaSyntaxError } from './lexer'
 import { parseFormula, type Ast, type BinOp } from './parser'
 import { sameSheet, type RefAddr } from './refs'
-import { ERR, FormulaError, MAX_COL, MAX_ROW, type CellProvider, type EvalContext, type Value } from './types'
+import { ERR, EvalSignal, FormulaError, MAX_COL, MAX_ROW, UnsupportedFormula, type CellProvider, type EvalContext, type Value } from './types'
 import { ArrayV, compare, RangeV, toNum, toStr, UnionV, type Val } from './values'
 
 function arith(op: BinOp, x: number, y: number): Value {
@@ -84,12 +84,20 @@ export class Evaluator implements Ev {
   readonly sheet: string | undefined
   readonly r: number
   readonly c: number
+  private readonly strict: boolean
 
   constructor(ctx: EvalContext) {
     this.provider = ctx.provider
     this.sheet = ctx.sheet
     this.r = ctx.r
     this.c = ctx.c
+    this.strict = !!ctx.strict
+  }
+
+  /** what the engine cannot compute: #NAME?, or the evaluation stopped (`EvalContext.strict`) */
+  private unsupported(): Val {
+    if (this.strict) throw new UnsupportedFormula()
+    return ERR.NAME
   }
 
   eval(ast: Ast, top: boolean): Val {
@@ -103,7 +111,7 @@ export class Evaluator implements Ev {
       case 'missing':
         return null
       case 'name':
-        return ERR.NAME
+        return this.unsupported()
       case 'array':
         return new ArrayV(ast.rows)
       case 'ref':
@@ -159,7 +167,7 @@ export class Evaluator implements Ev {
   }
 
   private call(name: string, args: Ast[], top: boolean): Val {
-    if (!Object.hasOwn(FUNCTIONS, name)) return ERR.NAME
+    if (!Object.hasOwn(FUNCTIONS, name)) return this.unsupported()
     const def = FUNCTIONS[name]
     if (args.length < def.min || args.length > def.max) return ERR.VALUE
     if (def.kind === 'lazy') return guard(() => def.fn(args, this, top))
@@ -185,7 +193,8 @@ export class Evaluator implements Ev {
     let { r1, c1 } = rg
     if ((r1 === MAX_ROW || c1 === MAX_COL) && this.provider.bounds) {
       const b = this.provider.bounds(rg.sheet)
-      if (r1 === MAX_ROW) r1 = Math.max(rg.r0, Math.min(r1, b.rows - 1))
+      // a whole column is all the rows the sheet has: more than Excel's when it was read from a large text file
+      if (r1 === MAX_ROW) r1 = Math.max(rg.r0, b.rows - 1)
       if (c1 === MAX_COL) c1 = Math.max(rg.c0, Math.min(c1, b.cols - 1))
     }
     return { r1, c1 }
@@ -238,7 +247,10 @@ export class Evaluator implements Ev {
   }
 }
 
-/** Evaluate a parsed formula for the cell at ctx.{sheet,r,c}. Never throws; errors come back as FormulaError. */
+/**
+ * Evaluate a parsed formula for the cell at ctx.{sheet,r,c}. Errors come back as FormulaError; it throws nothing but
+ * an `EvalSignal` (one the provider throws, or `UnsupportedFormula` when `ctx.strict`).
+ */
 export function evaluate(ast: Ast, ctx: EvalContext): Value {
   const prev = getDate1904()
   setDate1904(!!ctx.provider.date1904)
@@ -250,7 +262,35 @@ export function evaluate(ast: Ast, ctx: EvalContext): Value {
     if (typeof x === 'number') return Number.isFinite(x) ? x + 0 : ERR.NUM
     return x
   } catch (e) {
+    if (e instanceof EvalSignal) throw e
     return e instanceof FormulaError ? e : ERR.VALUE
+  } finally {
+    setDate1904(prev)
+  }
+}
+
+/**
+ * Evaluate an array formula (entered over `h` × `w` cells): no implicit intersection at the top, and a value for
+ * each cell. A result of one row / column / value repeats over the cells; cells past a larger one are #N/A.
+ */
+export function evaluateArray(ast: Ast, ctx: EvalContext, h: number, w: number): Value[][] {
+  const prev = getDate1904()
+  setDate1904(!!ctx.provider.date1904)
+  const fill = (f: (i: number, j: number) => Value) => Array.from({ length: h }, (_, i) => Array.from({ length: w }, (_, j) => f(i, j)))
+  try {
+    const ev = new Evaluator(ctx)
+    const v = ev.eval(ast, false)
+    const data = v instanceof UnionV ? [[ERR.VALUE as Value]] : ev.toArray(v)
+    return fill((i, j) => {
+      const x = pick(data, i, j)
+      if (x === null) return 0
+      if (typeof x === 'number') return Number.isFinite(x) ? x + 0 : ERR.NUM
+      return x
+    })
+  } catch (e) {
+    if (e instanceof EvalSignal) throw e
+    const err = e instanceof FormulaError ? e : ERR.VALUE
+    return fill(() => err)
   } finally {
     setDate1904(prev)
   }

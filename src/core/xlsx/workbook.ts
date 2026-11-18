@@ -7,6 +7,9 @@ import { Calc } from './calc'
 import { kid, kids, num, parseXmlStream, type Attrs, type SaxHandler } from '../xml'
 import { formatValue, formatText } from './numfmt'
 import { parseSheetStyles, type SheetStyles } from './styles'
+import { expandShared, formulaAt } from './structure'
+import { stripFunctionPrefixes } from './formula'
+import type { Shift } from './follow'
 import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
 
 export const T_NUM = 0
@@ -63,6 +66,8 @@ export class SheetData {
   shared = new Map<number, { master: number; text: string }>()
   /** dependent cell key → shared formula si */
   depOf = new Map<number, number>()
+  /** array formulas: first cell key → the cells the formula fills. One only while that cell has a formula. */
+  arrays = new Map<number, Merge>()
   /** edited cell keys (r * MAX_COL + c) */
   edited = new Set<number>()
   /** row heights in pt / hidden flags (from the file or the editor) */
@@ -79,8 +84,18 @@ export class SheetData {
   dirtyRows = new Set<number>()
   /** formulas rewritten because another sheet changed */
   formulaChanged = false
+  /** formula cells computed anew since the sheet was read: the value the file holds for them is stale */
+  revalued = new Set<number>()
+  /** the cells of the shared formulas have their own text in `formulas` (`expandShared`) */
+  sharedExpanded = false
+  /** rows / columns inserted and deleted since the sheet was read, in order: what points at its cells in its XML follows when it is written */
+  shifts: Shift[] = []
+  /** sheets renamed since ([old, new]): its validations and conditional formats may name them */
+  renames: [string, string][] = []
   /** formula cells stored without a cached value (to compute after load) */
   uncached: number[] = []
+  /** its formulas were computed after it was read (a workbook that says to compute on load) */
+  calculated = false
   rows: (unknown[] | undefined)[] = []
   /** a sheet too large for memory: its rows are read from the file by pages, those in memory being in `rows` */
   pages?: RowPages
@@ -109,6 +124,7 @@ class SheetHandler implements SaxHandler {
   private hasVal = false
   private capture = 0 // 1 v, 2 f, 3 inline t
   private fShared = -1
+  private fArray = ''
   private inIs = false
   newSizes: [number, number][] = []
   headerReady = false
@@ -137,6 +153,7 @@ class SheetHandler implements SaxHandler {
       case 'f':
         this.capture = 2
         this.fShared = a.t === 'shared' && a.si !== undefined ? Number(a.si) : -1
+        this.fArray = a.t === 'array' && a.ref ? a.ref : ''
         return
       case 'is':
         this.inIs = true
@@ -221,6 +238,11 @@ class SheetHandler implements SaxHandler {
         if (c > this.d.maxCol) this.d.maxCol = c
         const key = this.row * MAX_COL + c
         if (this.formula) this.d.formulas.set(key, this.formula)
+        if (this.fArray) {
+          const rg = this.formula ? parseRange(this.fArray) : undefined
+          if (rg && rg.r0 >= 0 && rg.c0 >= 0 && rg.r1 >= rg.r0 && rg.c1 >= rg.c0 && rg.r1 < MAX_ROWS && rg.c1 < MAX_COL) this.d.arrays.set(key, rg)
+          this.fArray = ''
+        }
         if (this.fShared >= 0) {
           if (this.formula) this.d.shared.set(this.fShared, { master: key, text: this.formula })
           else this.d.depOf.set(key, this.fShared)
@@ -342,6 +364,8 @@ export class XlsxWorkbook {
     public styles: SheetStyles,
     readonly date1904: boolean,
     readonly theme: Theme,
+    /** the file says its formula values are not to be trusted (`fullCalcOnLoad`): they are computed when it is read */
+    readonly fullCalc = false,
   ) {}
 
   static async open(pkg: OpcPackage, mainPath: string): Promise<XlsxWorkbook> {
@@ -359,7 +383,8 @@ export class XlsxWorkbook {
     const styles = parseSheetStyles(stylesPath ? await pkg.xml(stylesPath) : undefined, theme)
     const pr = kid(root, 'workbookPr')
     const date1904 = pr?.a.date1904 === '1' || pr?.a.date1904 === 'true'
-    const wb = new XlsxWorkbook(pkg, mainPath, rels, sheets, styles, date1904, theme)
+    const full = kid(root, 'calcPr')?.a.fullCalcOnLoad
+    const wb = new XlsxWorkbook(pkg, mainPath, rels, sheets, styles, date1904, theme, full === '1' || full === 'true')
     wb.comments = await readXlsxComments(pkg, mainPath, rels, sheets).catch((e: Error) => {
       console.warn('[office-engine] comments not read:', e.message)
       return new XlsxComments()
@@ -447,15 +472,13 @@ export class XlsxWorkbook {
         }
         d.done = true
         emit({ ...this.snapshot(index, d, sizes, !sentHeader), merges: d.merges, ...(stale ? { recalc: true } : {}) })
-        if (d.uncached.length) {
-          // files written by libraries often omit cached formula results: compute them (other sheets may be referenced)
-          const keys = d.uncached.splice(0)
-          void (async () => {
-            await Promise.all(this.sheets.map((s) => (s.index === index ? null : this.loadSheet(s.index, () => {}))))
-            this.calc.invalidate()
-            this.calc.computeMissing(index, keys)
-            emit({ ...this.snapshot(index, d, [], false), recalc: true })
-          })()
+        // files written by libraries often omit cached formula results, or hold zeros and say to compute: they are computed
+        if (d.uncached.length || (this.fullCalc && (d.formulas.size || d.depOf.size))) {
+          void this.computeStale().then(() => {
+            // (where the sheet is now: sheets may have been added or moved meanwhile; nowhere when it was deleted)
+            const now = this.sheets.findIndex((s) => s.path === info.path)
+            if (now >= 0) emit({ ...this.snapshot(now, d, [], false), recalc: true })
+          })
         }
       } catch (e) {
         d.done = true
@@ -464,6 +487,46 @@ export class XlsxWorkbook {
       }
     })()
     return d.loading
+  }
+
+  private stale?: Promise<void>
+
+  /**
+   * Computes the formulas the file gives no value for (all of them when it says to compute on load). In one pass
+   * over the workbook, every sheet read first: a formula may read any sheet, and one computed before what it reads
+   * would be wrong.
+   */
+  private computeStale(): Promise<void> {
+    const run = async () => {
+      await Promise.all(this.sheets.map((s) => this.loadSheet(s.index, () => {})))
+      const cells: { sheet: number; key: number }[] = []
+      for (const [sheet, d] of this.sheetsData) {
+        if (!d.done || d.error) continue
+        if (this.fullCalc && !d.calculated) {
+          expandShared(d)
+          for (const key of d.formulas.keys()) cells.push({ sheet, key })
+        } else for (const key of d.uncached) cells.push({ sheet, key })
+        d.uncached = []
+        d.calculated = true
+      }
+      if (!cells.length) return
+      this.calc.invalidate()
+      this.calc.computeMissing(cells)
+      // what computing them built (a parsed formula per cell) is not kept for a document that may only be read
+      this.calc.invalidate()
+    }
+    // one at a time; a sheet read after a pass (added, imported) gets the next
+    const next = (this.stale ?? Promise.resolve()).then(run, run)
+    this.stale = next
+    void next.finally(() => {
+      if (this.stale === next) this.stale = undefined
+    })
+    return next
+  }
+
+  /** resolves once the values being computed after reading sheets are in (`computeStale`) */
+  async settled(): Promise<void> {
+    while (this.stale) await this.stale.catch(() => {})
   }
 
   /** loads the sheets whose rows come from a loader (an imported text file) and are not in yet: saving writes them from the model */
@@ -604,6 +667,7 @@ export class XlsxWorkbook {
     const norm = (t: string) => (opts.matchCase ? t : t.toLowerCase())
     const q = norm(query)
     const xfs = this.styles.xfs
+    if (opts.formulas) expandShared(d)
     const scan = (r: number, row: unknown[]) => {
       for (let k = 0; k < row.length && out.length < limit; k += 4) {
         const c = row[k] as number
@@ -646,7 +710,9 @@ export class XlsxWorkbook {
     const d = this.sheetsData.get(sheet)
     if (d) await this.ensure(d, r, r)
     const row = d?.rows[r]
-    const formula = d?.formulas.get(r * MAX_COL + c)
+    // as it is typed: without the prefixes the file gives the functions newer than its format
+    const text = d && formulaAt(d, r * MAX_COL + c)
+    const formula = text && stripFunctionPrefixes(text)
     if (!row) return formula ? { value: '', formula: '=' + formula, type: 'formula' } : undefined
     for (let k = 0; k < row.length; k += 4) {
       if (row[k] !== c) continue

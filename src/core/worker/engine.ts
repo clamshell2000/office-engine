@@ -186,6 +186,10 @@ export class Engine {
       }
       case 'xlsx.set':
         return this.xed().setCells(args[0] as number, args[1] as CellInput[])
+      case 'xlsx.copy':
+        return this.xed().copy(args[0] as number, args[1] as Range)
+      case 'xlsx.region':
+        return this.xed().region(args[0] as number, args[1] as Range)
       case 'xlsx.format':
         return this.xed().format(args[0] as number, args[1] as Range, args[2] as FmtPatch)
       case 'xlsx.sheetOp':

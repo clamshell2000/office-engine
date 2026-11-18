@@ -179,10 +179,10 @@ Diagram sources open as a document holding the drawing (an SVG picture, editable
 
 ### XLSX
 
-- **Cells**: edit, line break inside a cell or the formula bar (`Alt+Enter` or `Shift+Enter`: the cell wraps and its row grows to show every line), range selection, select all (Ctrl/⌘+A), copy/cut/paste, fill down/right, sort, find & replace (match case, entire cell, in formulas)
-- **Formulas**: auto-calculated (135 functions), function name & argument hints while typing, click/drag cells (incl. other sheets, arrow keys) to insert references, colored references, auto-close parentheses, functions menu (SUM/AVERAGE/COUNT/MAX/MIN)
+- **Cells**: edit, line break inside a cell or the formula bar (`Alt+Enter` or `Shift+Enter`: the cell wraps and its row grows to show every line), range selection, select all (Ctrl/⌘+A), copy/cut/paste (within a workbook: exact values, formats and formulas, a cut moving the cells and what reads them; from other programs: tab separated text, quoted cells with line breaks included; a whole column or sheet is cleared and copied whole, the rows not shown yet too), fill down/right, sort (the rows of the table around the selection, its header left on top), find & replace (match case, entire cell, in formulas). A date or a percentage typed into a cell without a format shows as one; a cell formatted as Text keeps what is typed
+- **Formulas**: auto-calculated (135 functions; shared and array formulas; `INDIRECT` / `OFFSET` / `NOW` / `RAND` at every change; a workbook that says to compute on load is computed when opened; a formula using a function the engine does not have, or a defined name, keeps the value the file holds), function name & argument hints while typing, click/drag cells (incl. other sheets, arrow keys) to insert references, colored references, auto-close parentheses, functions menu (SUM/AVERAGE/COUNT/MAX/MIN)
 - **Formatting**: paint format, currency/percent/decimal buttons + 20 number formats, font, size, B/I/U/S, text/fill color, borders (8 kinds, color, line style), merge all/horizontally/vertically, horizontal & vertical alignment, wrap, text rotation, clear formatting
-- **Rows & columns**: insert/delete/hide/unhide, drag to resize column width/row height, freeze, gridlines
+- **Rows & columns**: insert/delete/hide/unhide (defined names, print areas, filters, hyperlinks, data validation, conditional formats, page breaks, tables, the anchors of pictures and charts and the cells charts draw follow), drag to resize column width/row height, freeze, gridlines
 - **Sheets**: add/rename/delete/reorder
 - **Other**: context menu, undo/redo
 
@@ -239,7 +239,7 @@ Comment text is plain (lines kept); formatting inside comments read from a file 
 ## Saving
 
 - DOCX: edited paragraphs are regenerated from the original XML (keeps `pPr`, `rPr`, images, bookmarks, comments); untouched paragraphs keep original bytes
-- XLSX: only `<row>`s containing edited cells are rewritten (streamed, never loads the whole sheet into a DOM); new strings written as inline strings; `fullCalcOnLoad` set so Excel recalculates formulas
+- XLSX: only `<row>`s containing edited cells are rewritten (streamed, never loads the whole sheet into a DOM); new strings written as inline strings; the values of the formulas an edit recomputed are written (in every sheet), and `fullCalcOnLoad` set so Excel recalculates all of them; functions newer than the format get their `_xlfn.` prefix; a workbook with macros, or a template, is saved as what it is (`OpenResult.ext`: `xlsm`, `xltx`…; the macros are kept)
 - PPTX: only `a:p` of edited shapes are regenerated
 - Unchanged ZIP entries are copied as-is (no recompression)
 
@@ -258,7 +258,7 @@ Comment text is plain (lines kept); formatting inside comments read from a file 
 
 - Formulas: no defined names, structured refs (`Table1[Col]`), 3-D refs
 - DOCX: text boxes and nested tables are read-only; paragraphs with fields spanning multiple paragraphs (TOC) are read-only; headers / footers are edited as text lines (pictures, tables and shapes in them are replaced when edited, with a warning); a header taller than the top margin overlaps the text; tracked changes don't cover formatting changes, paragraph marks or pictures; page setup applies to the whole document (not per section)
-- XLSX: no chart/pivot/conditional format/data validation/filter editing; inserting/deleting rows & columns doesn't shift conditional formats/data validation; a sheet read by pages (a CSV past 12 million cells) takes no row / column insert or delete, and its formulas only the rows that fit in memory
+- XLSX: no chart/pivot/conditional format/data validation/filter editing; a table whose cells are all deleted stays in the file; cells cut and pasted do not take their merges, comments or conditional formats along; a sheet read by pages (a CSV past 12 million cells) takes no row / column insert or delete, and its formulas only the rows that fit in memory
 - PPTX: can't rotate shapes with the mouse yet, can't edit text inside tables yet, no table insert, no animations/transitions; slide list changes (add/delete/move) are not undoable
 - Comments: plain text only; DOCX comments can't cover text in more than one table cell or across a table; comments in headers, footers and footnotes are kept but not shown; XLSX comments don't move with sorted rows; PPTX comments anchored to a shape are shown at the shape's position when the file is opened and keep that anchor until moved
 - Files from someone else: nothing a file says is used as an address to load when it is opened (a color that is not a color, a link that is not a web / mail / phone link and a name the format does not know are ignored; pictures linked from outside the file are not fetched). A package is refused, with a message, when it names a part twice (also by case), holds more than 200,000 files, has a part that unpacks to more than 1 GB (16 GB for sheet data and the document body, which are streamed) or nests XML deeper than 1,024 elements

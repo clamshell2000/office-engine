@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type MutableRefObject, type ReactNode } from 'react'
-import type { BookOp, CellDetail, CellInput, CellOut, FindMatch, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, WorkbookMeta, XlsxEditResult } from '../../core/xlsx/types'
+import type { BookOp, CellDetail, CellInput, CellOut, FindMatch, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, WorkbookMeta, XlsxClip, XlsxEditResult } from '../../core/xlsx/types'
+import { parseTsv, tsvCell } from '../../core/xlsx/clip'
 import { colName, MAX_ROWS } from '../../core/xlsx/workbook'
 import { detectSeparator, parseCsv } from '../../core/convert'
 import { closeFormula, formulaContext, isFormula, rangeText, type FormulaContext } from '../../core/xlsx/formula/assist'
@@ -53,6 +54,19 @@ class SheetState {
   scrollPos?: { x: number; y: number }
   /** a cell to select and scroll to (a comment shown from the panel); `n` changes every time */
   goto?: { r: number; c: number; n: number }
+}
+
+/**
+ * How many of the `n` frozen rows / columns are shown as such: those that fit in most of the view. A pane frozen
+ * past it leaves nothing to scroll (the rest of the sheet could not be reached), and a file may freeze a million
+ * rows: every one of them would be read and drawn.
+ */
+function frozenShown(axis: Axis, n: number, view: number): number {
+  if (!(n > 0)) return 0
+  const room = view * 0.75
+  let k = 0
+  while (k < n && k < 4096 && axis.pos(k + 1) <= room) k++
+  return k
 }
 
 /** the threads on cells of sheet `path` (not resolved, or the current one), by cell key */
@@ -202,6 +216,20 @@ class XlsxStore {
   row(sheet: number, r: number): CellOut[] | undefined {
     return this.sheets.get(sheet)?.blocks.get(Math.floor(r / BLOCK))?.rows.get(r)
   }
+
+  /** whether the rows r0..r1 are here as the worker has them now (not being read, none missing) */
+  loaded(sheet: number, r0: number, r1: number): boolean {
+    const s = this.sheets.get(sheet)
+    if (!s || !s.done) return false
+    for (let b = Math.floor(r0 / BLOCK); b <= Math.floor(r1 / BLOCK); b++) if (s.inflight.has(b) || !s.blocks.get(b)?.complete) return false
+    return true
+  }
+
+  /**
+   * The cells copied or cut last (from any sheet of the workbook): `text` is what went to the clipboard. Pasting
+   * that same text pastes them (values, formulas, formats) instead of the text.
+   */
+  clip: { text: string; data: XlsxClip; cut: boolean } | null = null
 
   dispose() {
     this.off()
@@ -557,13 +585,15 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   }
   const [resizing, setResizing] = useState<{ axis: 'col' | 'row'; i: number; start: number; size: number } | null>(null)
 
-  const { rowAxis, colAxis, frozen } = s
+  const { rowAxis, colAxis } = s
   const drawings = useSheetDrawings(client, sheet)
   // the sheet reaches as far as its drawings, past its last filled cell
   const drawn = drawingExtent(drawings, colAxis, rowAxis)
   const HW = Math.max(40, 12 + 7 * String(Math.max(s.rows, 1000)).length)
   const viewW = Math.max(0, size.w - HW)
   const viewH = Math.max(0, size.h - HH)
+  // the rows / columns frozen, as far as they are shown: see `frozenShown`
+  const frozen = { rows: frozenShown(rowAxis, s.frozen.rows, viewH), cols: frozenShown(colAxis, s.frozen.cols, viewW) }
   rowAxis.count = Math.max(s.rows + (s.done ? 20 : 1), Math.ceil(viewH / rowAxis.def) + 1, frozen.rows + 1, sel.fr + 2, drawn.rows + 1)
   colAxis.count = Math.max(s.cols + 3, 26, Math.ceil(viewW / Math.max(1, colAxis.def)) + 1, frozen.cols + 1, sel.fc + 2, drawn.cols + 1)
   const frozenW = colAxis.pos(frozen.cols)
@@ -1115,15 +1145,8 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     scrollIntoView(r, c)
   }
 
-  const clearRange = () => {
-    const cells = []
-    const R = { ...rect, r1: Math.min(rect.r1, rect.r0 + 5000), c1: Math.min(rect.c1, rect.c0 + 200) }
-    for (let r = R.r0; r <= R.r1; r++) {
-      const row = store.row(sheet, r)
-      for (let c = R.c0; c <= R.c1; c++) if (row?.some((x) => x[0] === c && x[1] !== '')) cells.push({ r, c, input: '' })
-    }
-    if (cells.length) void run(client.call('xlsx.set', sheet, cells))
-  }
+  // in the worker: every cell of the range, also those of rows not shown yet (a whole column, the whole sheet)
+  const clearRange = () => void sheetOp({ op: 'clear', range: rect })
 
   const activeCss = (styles[styleOf(sel.ar, sel.ac)] ?? {}) as Record<string, string | number>
   const fmt = (patch: FmtPatch) => fmtAt(rect, patch)
@@ -1139,16 +1162,40 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   const undo = () => void run(client.call('xlsx.undo'))
   const redo = () => void run(client.call('xlsx.redo'))
 
-  const tsv = () => {
+  /** the selection as clipboard text, when all its rows are at hand (else null: the worker has them) */
+  const tsv = (): string | null => {
+    const r1 = Math.min(rect.r1, s.rows - 1)
+    const c1 = Math.min(rect.c1, s.cols - 1)
+    if (r1 - rect.r0 > 2000 || !store.loaded(sheet, rect.r0, Math.max(rect.r0, r1))) return null
     const lines: string[] = []
-    const R = { ...rect, r1: Math.min(rect.r1, rect.r0 + 20000) }
-    for (let r = R.r0; r <= R.r1; r++) {
+    for (let r = rect.r0; r <= Math.max(rect.r0, r1); r++) {
       const row = store.row(sheet, r)
       const vals: string[] = []
-      for (let c = R.c0; c <= R.c1; c++) vals.push(row?.find((x) => x[0] === c)?.[1] ?? '')
+      for (let c = rect.c0; c <= Math.max(rect.c0, c1); c++) vals.push(tsvCell(row?.find((x) => x[0] === c)?.[1] ?? ''))
       lines.push(vals.join('\t'))
     }
     return lines.join('\n')
+  }
+
+  /**
+   * Copy / cut: the cells are read in the worker as they are (values, formulas, formats: what Paste writes here),
+   * all of them, the rows not shown yet included. The clipboard gets their text: at once when the rows are at
+   * hand, as the event wants it, else when the worker has read them.
+   */
+  const copySel = (e: React.ClipboardEvent, cut: boolean) => {
+    e.preventDefault()
+    const range = { ...rect }
+    const local = tsv()
+    if (local !== null) e.clipboardData.setData('text/plain', local)
+    store.clip = null
+    client
+      .call('xlsx.copy', sheet, range)
+      .then(async (data) => {
+        if (local === null) await navigator.clipboard.writeText(data.text)
+        store.clip = { text: local ?? data.text, data, cut }
+        if (cut) await sheetOp({ op: 'clear', range })
+      })
+      .catch((err: Error) => setToast(local === null && err.name === 'NotAllowedError' ? 'The browser blocked clipboard access: select fewer rows to copy them' : err.message))
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -1371,11 +1418,24 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     if (!ref) return void startEdit(`=${fn}(`)
     void run(client.call('xlsx.set', sheet, [{ r: ar, c: ac, input: `=${fn}(${ref})` }]))
   }
-  const sortBy = (desc: boolean) => {
-    // one cell: sort the data below the frozen header by the active column
-    const single = rect.r0 === rect.r1
-    const range = single ? { r0: frozen.rows, c0: 0, r1: Math.max(frozen.rows, s.rows - 1), c1: Math.max(0, s.cols - 1) } : rect
-    void sheetOp({ op: 'sort', range, col: sel.ac, desc })
+  const sortBy = async (desc: boolean) => {
+    // The rows of the table around the selection, whole (the selected cells alone would be parted from their rows):
+    // all of them when the selection is in one row, else the selected ones. Its header stays on top, like frozen rows.
+    const picked = { ...rect }
+    const col = sel.ac
+    let table: { range: Range; header: boolean }
+    try {
+      table = await client.call('xlsx.region', sheet, picked)
+    } catch (e) {
+      return setToast((e as Error).message)
+    }
+    const R = table.range
+    let r0 = picked.r0 === picked.r1 ? R.r0 : Math.max(picked.r0, R.r0)
+    const r1 = picked.r0 === picked.r1 ? R.r1 : Math.min(picked.r1, R.r1)
+    if (r0 === R.r0 && table.header) r0++
+    r0 = Math.max(r0, s.frozen.rows)
+    if (r1 <= r0) return
+    void sheetOp({ op: 'sort', range: { r0, c0: R.c0, r1, c1: R.c1 }, col, desc })
   }
   const rowsOp = (k: string) => {
     const nr = rect.r1 - rect.r0 + 1
@@ -1396,8 +1456,20 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     if (ops[k]) void sheetOp(ops[k])
   }
   const pasteText = (raw: string) => {
-    const text = raw.replace(/\r\n?/g, '\n').replace(/\n$/, '')
-    const cells = text.split('\n').flatMap((line, i) => line.split('\t').map((v, j) => ({ r: sel.ar + i, c: sel.ac + j, input: v })))
+    const norm = (t: string) => t.replace(/\r\n?/g, '\n').replace(/\n$/, '')
+    const at = { r: rect.r0, c: rect.c0 }
+    const clip = store.clip
+    // the cells copied here: as they were (values, formulas, formats), not as the text of them
+    if (clip && norm(raw) === norm(clip.text)) {
+      const { cells, range } = clip.data
+      const w = Math.max(1, ...cells.map((row) => row.length))
+      void sheetOp({ op: 'paste', range: { r0: at.r, c0: at.c, r1: at.r + cells.length - 1, c1: at.c + w - 1 }, cells, from: { sheet: clip.data.sheet, r0: range.r0, c0: range.c0 }, ...(clip.cut ? { moved: true } : {}) })
+      // moved once: pasted again, they are copied
+      if (clip.cut) store.clip = { ...clip, cut: false }
+      return
+    }
+    const cells = parseTsv(raw).flatMap((line, i) => line.map((v, j) => ({ r: at.r + i, c: at.c + j, input: v })))
+    if (cells.length > 100_000) setToast(`Only the first 100,000 of the ${cells.length.toLocaleString()} cells were pasted`)
     if (cells.length) void run(client.call('xlsx.set', sheet, cells.slice(0, 100_000)))
   }
   const ctxItems = (): MenuItem[] => {
@@ -1444,7 +1516,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
       { label: 'Clear contents', icon: 'trash', hint: 'Del', sep: true, run: clearRange },
       { label: 'Clear formatting', icon: 'clear', hint: `${MOD}\\`, run: () => fmt({ clear: true }) },
       { label: `Freeze up to ${colName(sel.ac)}${sel.ar + 1}`, icon: 'freeze', sep: true, run: () => freeze('sel') },
-      { label: 'Unfreeze', run: () => freeze('none'), disabled: !frozen.rows && !frozen.cols },
+      { label: 'Unfreeze', run: () => freeze('none'), disabled: !s.frozen.rows && !s.frozen.cols },
     ]
   }
 
@@ -1667,15 +1739,10 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
         tabIndex={0}
         onKeyDown={onKeyDown}
         onCopy={(e) => {
-          if (edit) return
-          e.preventDefault()
-          e.clipboardData.setData('text/plain', tsv())
+          if (!edit) copySel(e, false)
         }}
         onCut={(e) => {
-          if (edit || !editable) return
-          e.preventDefault()
-          e.clipboardData.setData('text/plain', tsv())
-          clearRange()
+          if (!edit && editable) copySel(e, true)
         }}
         onPaste={(e) => {
           if (edit || !editable) return
@@ -1752,7 +1819,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
           base={meta.baseFont as { fontFamily?: string; fontSize?: string | number }}
           format={meta.formats[styleOf(sel.ar, sel.ac)] ?? 'General'}
           merged={merged}
-          frozen={!!(frozen.rows || frozen.cols)}
+          frozen={!!(s.frozen.rows || s.frozen.cols)}
           gridlines={s.gridLines}
           painter={painter !== null}
           onToggle={toggle}

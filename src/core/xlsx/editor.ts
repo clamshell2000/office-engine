@@ -7,16 +7,18 @@ import { relOfType, relsPathFor } from '../opc'
 import type { DocComment } from '../comments'
 import { writeXlsxComments } from './comments'
 import {
-  clone, el, escText, relIdAttrs, getAttr, isNode, kidOf, kidsOf, local, parseRaw, prefixOf, rootEl, serialize, setAttr, setOrdered,
+  clone, el, escText, relIdAttrs, getAttr, isNode, kidOf, kidsOf, local, parseRaw, prefixOf, rootEl, serialize, setAttr, setOrdered, textContent,
   type RChild, type RNode,
 } from '../raw'
 import { parseXml } from '../xml'
 import { BUILTIN_FORMATS, isDateFormat } from './numfmt'
 import { parseSheetStyles } from './styles'
-import type { BookOp, BorderKind, CellInput, ColInfo, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, XlsxEditResult } from './types'
-import { materializeShared, restore, setColWidth, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
-import { renameSheetInFormula, translateFormula } from './formula'
+import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
+import { expandShared, overflows, restore, setColWidth, setFormula, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
+import { dropSheetInFormula, moveRefsInFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type MoveOp } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
+import { tsvCell } from './clip'
+import { followParts, followSheetTail, renameInCharts, sheetTail, type PartEdit } from './follow'
 import {
   colName, DEFAULT_STYLES_PART, MAX_COL, MAX_ROWS, parseRef, rowSizesOf, SheetData, stylesPartOf, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST,
   T_STR, XlsxWorkbook,
@@ -50,7 +52,32 @@ export interface Change {
   full?: { before: Snapshot; after: Snapshot }
   /** comments the change moved or took away (inserted / deleted rows and columns): their values before / after */
   cm?: { before: [string, DocComment | null][]; after: [string, DocComment | null][] }
+  /** formulas of the other sheets the change rewrote (they read rows / columns that moved): their text before / after */
+  others?: { sheet: number; key: number; prev: string; next: string }[]
+  /** parts rewritten with it (defined names, tables, drawings, charts following rows / columns that moved) */
+  parts?: PartEdit[]
 }
+
+/** cells an edit may touch at once (each is kept for Undo) */
+const MAX_CELLS_AT_ONCE = 2_000_000
+
+/** the cell a copied one is pasted as: its value checked (the cells of a paste may come from anywhere), with format `st` */
+function clipEntry(cell: NonNullable<ClipCell>, st: number): Entry | null {
+  const [t, v] = cell
+  switch (t) {
+    case T_NUM:
+      return typeof v === 'number' && Number.isFinite(v) ? [T_NUM, v, st] : null
+    case T_STR:
+    case T_ERR:
+    case T_DATE:
+      return typeof v === 'string' ? [t, v, st] : null
+    case T_BOOL:
+      return [T_BOOL, v ? 1 : 0, st]
+    default:
+      return st ? [T_EMPTY, '', st] : null
+  }
+}
+
 
 const FONT_ORDER = ['b', 'i', 'strike', 'condense', 'extend', 'outline', 'shadow', 'u', 'vertAlign', 'sz', 'color', 'name', 'family', 'charset', 'scheme']
 const WB_ORDER = [
@@ -98,30 +125,71 @@ function setEntry(d: SheetData, r: number, c: number, e: Entry | null) {
   if (c > d.maxCol) d.maxCol = c
 }
 
-function dateSerial(t: string): number | undefined {
+/**
+ * A date typed as 2024-01-15 or 15/01/2024 (day first; month first when only that reads as a date: 1/15/2024), with
+ * an optional time: its serial number and the format that shows it as typed. Undefined for what is not a date of
+ * the calendar (31/02/2024, 15/15/2024): it stays text, never another date.
+ */
+function dateInput(t: string, date1904: boolean): { serial: number; fmt: string } | undefined {
   let m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(t)
   let y: number, mo: number, d: number
+  let fmt = 'yyyy-mm-dd'
   if (m) [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
   else {
     m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?: (\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(t)
     if (!m) return undefined
     ;[d, mo, y] = [Number(m[1]), Number(m[2]), Number(m[3])]
+    fmt = 'dd/mm/yyyy'
+    if (mo > 12 && d <= 12) {
+      ;[d, mo] = [mo, d]
+      fmt = 'mm/dd/yyyy'
+    }
   }
-  const ms = Date.UTC(y, mo - 1, d, Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0))
-  if (!Number.isFinite(ms)) return undefined
-  return ms / 86400000 + 25569
+  const [hh, mi, ss] = [Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0)]
+  if (y < (date1904 ? 1904 : 1900) || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > new Date(Date.UTC(y, mo, 0)).getUTCDate() || hh > 23 || mi > 59 || ss > 59) return undefined
+  const ms = Date.UTC(y, mo - 1, d, hh, mi, ss)
+  // a workbook counting its dates from 1904 holds them 1462 days lower
+  const serial = ms / 86400000 + 25569 - (date1904 ? 1462 : 0)
+  // (the dates before March 1900 are off by the day Excel adds to February 1900: left as text)
+  if (!date1904 && serial < 61) return undefined
+  if (m[4] !== undefined) fmt += m[6] !== undefined ? ' hh:mm:ss' : ' hh:mm'
+  return { serial, fmt }
 }
 
-function parseInput(input: string, style: number, isDate = false): { e: Entry | null; f?: string } {
+/** what the cell typed into is formatted as, for reading what is typed */
+interface InputContext {
+  /** its number format ('' or "General": none) */
+  fmt: string
+  date1904: boolean
+}
+
+const noQuotes = (fmt: string) => fmt.replace(/"[^"]*"|\\.|\[[^\]]*\]/g, '')
+
+/**
+ * The cell for what was typed. `want`: the number format to give a cell that has none, so that what was typed as a
+ * date or a percentage shows as one (as Excel does).
+ */
+function parseInput(input: string, style: number, ctx: InputContext = { fmt: '', date1904: false }): { e: Entry | null; f?: string; want?: string } {
   if (input === '') return { e: style ? [T_EMPTY, '', style] : null }
+  // a cell formatted as Text holds what is typed as it is typed: a phone number keeps its zeros, a formula is its text
+  if (ctx.fmt === '@') return { e: [T_STR, input, style] }
   if (input.startsWith('=') && input.length > 1) return { e: [T_STR, input, style], f: input.slice(1) }
   const t = input.trim()
-  if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t)) return { e: [T_NUM, Number(t), style] }
-  if (/^[-+]?(\d+\.?\d*|\.\d+)%$/.test(t)) return { e: [T_NUM, Number(t.slice(0, -1)) / 100, style] }
+  const general = !ctx.fmt || /^general$/i.test(ctx.fmt)
+  // a number too large to be one (1e999) stays the text typed: the file has no way to say Infinity
+  if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t) && Number.isFinite(Number(t))) {
+    const n = Number(t)
+    // in a cell that shows percentages, 50 is 50% (as Excel reads it); a number under 1 is the fraction itself
+    return { e: [T_NUM, Math.abs(n) >= 1 && noQuotes(ctx.fmt).includes('%') ? n / 100 : n, style] }
+  }
+  if (/^[-+]?(\d+\.?\d*|\.\d+)%$/.test(t) && Number.isFinite(Number(t.slice(0, -1)))) {
+    const dec = /\.(\d+)%$/.exec(t)?.[1].length ?? 0
+    return { e: [T_NUM, Number(t.slice(0, -1)) / 100, style], want: general ? (dec ? `0.${'0'.repeat(Math.min(dec, 10))}%` : '0%') : undefined }
+  }
   if (/^(true|false)$/i.test(t)) return { e: [T_BOOL, /^true$/i.test(t) ? 1 : 0, style] }
-  if (isDate) {
-    const serial = dateSerial(t)
-    if (serial !== undefined) return { e: [T_NUM, serial, style] }
+  if (general || isDateFormat(ctx.fmt)) {
+    const date = dateInput(t, ctx.date1904)
+    if (date) return { e: [T_NUM, date.serial, style], want: general ? date.fmt : undefined }
   }
   return { e: [T_STR, input, style] }
 }
@@ -355,6 +423,22 @@ export class XlsxEditor {
 
   private lastRecalc: number[] = []
 
+  /**
+   * Before anything is edited: every sheet is in memory (a formula may read any, and a sheet never shown may hold
+   * formulas reading the cell edited: its values are saved too), the values a file left out are computed, and the
+   * cells of the shared formulas have their text (an edit records the formula a cell had).
+   */
+  private async ready(): Promise<void> {
+    const wb = this.wb
+    if (!wb.sheets.every((s) => wb.sheetsData.get(s.index)?.done)) {
+      await Promise.all(wb.sheets.map((s) => wb.loadSheet(s.index, () => {})))
+      // the dependencies known so far are those of the sheets read then
+      wb.calc.invalidate()
+    }
+    await wb.settled()
+    for (const d of wb.sheetsData.values()) expandShared(d)
+  }
+
   private apply(d: SheetData, cells: CellChange[], which: 'prev' | 'next') {
     const sheet = [...this.wb.sheetsData].find(([, x]) => x === d)?.[0] ?? 0
     const formulaKeys: { sheet: number; key: number }[] = []
@@ -404,6 +488,7 @@ export class XlsxEditor {
   }
 
   async setCells(sheet: number, inputs: CellInput[]): Promise<XlsxEditResult> {
+    await this.ready()
     const d = this.sheet(sheet)
     await this.prepare(sheet, d, inputs)
     const changes: CellChange[] = []
@@ -416,7 +501,8 @@ export class XlsxEditor {
       const key = r * MAX_COL + c
       const prev = getEntry(d, r, c)
       const st = prev?.[2] ?? 0
-      const { e, f } = parseInput(input, st, isDateFormat(xfs[st]?.numFmt ?? ''))
+      const { e, f, want } = parseInput(input, st, { fmt: xfs[st]?.numFmt ?? '', date1904: this.wb.date1904 })
+      if (e && want) e[2] = (ed ??= await this.styles()).derive(st, { numFmt: want })
       if (e && e[0] === T_STR && !f && input.includes('\n')) {
         if (!xfs[st]?.wrap) e[2] = (ed ??= await this.styles()).derive(st, { wrap: true })
         const a = d.rowAttrs.get(r)
@@ -487,6 +573,7 @@ export class XlsxEditor {
   }
 
   async format(sheet: number, range: Range, patch: FmtPatch): Promise<XlsxEditResult> {
+    await this.ready()
     const d = this.sheet(sheet)
     const ed = await this.styles()
     const r1 = Math.min(range.r1, range.r0 + 200_000)
@@ -516,10 +603,15 @@ export class XlsxEditor {
     const d = this.sheet(ch.sheet)
     this.lastRecalc = []
     if (ch.full) restore(d, which === 'prev' ? ch.full.before : ch.full.after)
+    for (const o of ch.others ?? []) {
+      const od = this.wb.sheetsData.get(o.sheet)
+      if (od) setFormula(od, o.key, which === 'prev' ? o.prev : o.next)
+    }
+    for (const p of ch.parts ?? []) this.wb.pkg.setPart(p.path, which === 'prev' ? p.prev : p.next)
     if (ch.cm) for (const [id, c] of which === 'prev' ? [...ch.cm.before].reverse() : ch.cm.after) this.wb.comments.set(id, c)
     this.apply(d, ch.cells, which)
     if (ch.lay) applyLayout(d, which === 'prev' ? ch.lay.before : ch.lay.after)
-    const recalc = ch.full ? this.recalcAll() : this.lastRecalc
+    const recalc = ch.full || ch.others?.length ? this.recalcAll() : this.lastRecalc
     return { sheet: ch.sheet, range: ch.range, layout: ch.full || ch.lay ? this.layout(ch.sheet) : undefined, recalc }
   }
 
@@ -568,6 +660,7 @@ export class XlsxEditor {
       range: ch.range,
       lay: ch.lay ? { before: layoutState(d), after: which === 'prev' ? ch.lay.before : ch.lay.after } : undefined,
       full: ch.full ? { before: snapshot(d), after: which === 'prev' ? ch.full.before : ch.full.after } : undefined,
+      others: ch.others?.map((o) => ({ ...o, prev: this.wb.sheetsData.get(o.sheet)?.formulas.get(o.key) ?? '', next: which === 'prev' ? o.prev : o.next })),
       cm: ch.cm
         ? { before: ch.cm.before.map(([id]) => [id, this.wb.comments.get(id) ?? null]), after: which === 'prev' ? [...ch.cm.before].reverse() : ch.cm.after }
         : undefined,
@@ -608,12 +701,18 @@ export class XlsxEditor {
     }
   }
 
+  private indexOf(d: SheetData): number {
+    for (const [i, x] of this.wb.sheetsData) if (x === d) return i
+    return -1
+  }
+
   private async allSheets(): Promise<{ name: string; d: SheetData }[]> {
     await Promise.all(this.wb.sheets.map((s) => this.wb.loadSheet(s.index, () => {})))
     return this.wb.sheets.map((s) => ({ name: s.name, d: this.wb.sheetsData.get(s.index)! }))
   }
 
   async sheetOp(sheet: number, op: SheetOp): Promise<XlsxEditResult> {
+    await this.ready()
     const d = this.sheet(sheet)
     const name = this.wb.sheets[sheet].name
     const all: Range = { r0: 0, c0: 0, r1: Math.max(0, d.maxRow + 50), c1: Math.max(0, d.maxCol + 10) }
@@ -632,13 +731,27 @@ export class XlsxEditor {
       case 'deleteCols': {
         if (d.pages) throw new Error(`Rows and columns cannot be inserted or deleted in a sheet of ${(d.maxRow + 1).toLocaleString()} rows (its rows are read from the file as they are shown)`)
         const others = await this.allSheets()
-        const before = snapshot(d)
         const axis = op.op.endsWith('Rows') ? 'row' : 'col'
-        shiftSheet(d, name, axis, op.at, op.op.startsWith('insert') ? op.n : -op.n, others)
-        const cm = this.shiftComments(this.wb.sheets[sheet].path, axis, op.at, op.op.startsWith('insert') ? op.n : -op.n)
+        if (op.op.startsWith('insert') && overflows(d, axis, op.at, op.n)) {
+          throw new Error(
+            axis === 'row'
+              ? 'Rows cannot be inserted: the last row of the sheet holds data, which would be pushed off the sheet. Delete or move it first.'
+              : 'Columns cannot be inserted: the last column of the sheet holds data, which would be pushed off the sheet. Delete or move it first.',
+          )
+        }
+        const before = snapshot(d)
+        const delta = op.op.startsWith('insert') ? op.n : -op.n
+        const edits = shiftSheet(d, name, axis, op.at, delta, others)
+        // what else points at the cells follows them: names, tables, pictures, charts (the sheet's own filters, links… when it is written)
+        const followed = await followParts(this.wb.pkg, this.wb.mainPath, this.wb.sheets[sheet].path, name, { axis, at: op.at, delta })
+        for (const h of followed.headers) setEntry(d, h.r, h.c, [T_STR, h.text, getEntry(d, h.r, h.c)?.[2] ?? 0])
+        if (followed.parts.length) this.bookChanged = true
+        const cm = this.shiftComments(this.wb.sheets[sheet].path, axis, op.at, delta)
         this.formulaTouched = true
         const recalc = this.recalcAll()
         const ch: Change = { sheet, cells: [], range: all, full: { before, after: snapshot(d) }, cm }
+        if (edits.length) ch.others = edits.map((e) => ({ sheet: this.indexOf(e.d), key: e.key, prev: e.prev, next: e.next }))
+        if (followed.parts.length) ch.parts = followed.parts
         this.undoStack.push(ch)
         this.redoStack = []
         return { sheet, range: all, layout: this.layout(sheet), recalc }
@@ -699,6 +812,10 @@ export class XlsxEditor {
           d.frozen = { rows: op.rows, cols: op.cols }
           d.dirtyView = true
         })
+      case 'clear':
+        return this.clear(sheet, d, op.range)
+      case 'paste':
+        return this.paste(sheet, d, op)
       case 'fill':
         await this.wb.ensure(d, op.range.r0, op.range.r1)
         return this.fill(sheet, d, op.range, op.dir)
@@ -708,8 +825,203 @@ export class XlsxEditor {
     }
   }
 
+  /** the cells of `range` that are in the sheet: it may run to the last row / column (a whole column, the whole sheet) */
+  private used(d: SheetData, range: Range): Range {
+    return { r0: range.r0, c0: range.c0, r1: Math.min(range.r1, Math.max(d.maxRow, d.rows.length - 1)), c1: Math.min(range.c1, d.maxCol) }
+  }
+
+  /**
+   * The block of filled cells `range` is part of: grown on every side while the row / column next to it (corners
+   * included) holds something, as Excel takes "the data around the selection". And whether its first row reads as
+   * a header: text over values that are not, or bold over rows that are not. What sorting a selection sorts: whole
+   * rows of the table (not the selected cells alone, which would part them from their rows), less its header.
+   */
+  async region(sheet: number, range: Range): Promise<{ range: Range; header: boolean }> {
+    const d = this.sheet(sheet)
+    const last = Math.max(d.maxRow, d.rows.length - 1)
+    const R: Range = { r0: Math.min(range.r0, Math.max(0, last)), c0: Math.min(range.c0, Math.max(0, d.maxCol)), r1: Math.min(range.r1, Math.max(0, last)), c1: Math.min(range.c1, Math.max(0, d.maxCol)) }
+    R.r1 = Math.max(R.r0, R.r1)
+    R.c1 = Math.max(R.c0, R.c1)
+    // a sheet read from its file by pages has no rows at hand to look around in
+    if (d.pages) return { range: R, header: false }
+    const filled = (r: number, c0: number, c1: number) => {
+      const row = d.rows[r]
+      if (row) for (let k = 0; k < row.length; k += 4) if ((row[k] as number) >= c0 && (row[k] as number) <= c1 && row[k + 1] !== T_EMPTY && row[k + 2] !== '') return true
+      return false
+    }
+    const colFilled = (c: number, r0: number, r1: number) => {
+      for (let r = Math.max(0, r0); r <= Math.min(last, r1); r++) if (filled(r, c, c)) return true
+      return false
+    }
+    for (let grew = true; grew; ) {
+      grew = false
+      while (R.r0 > 0 && filled(R.r0 - 1, R.c0 - 1, R.c1 + 1)) [R.r0, grew] = [R.r0 - 1, true]
+      while (R.r1 < last && filled(R.r1 + 1, R.c0 - 1, R.c1 + 1)) [R.r1, grew] = [R.r1 + 1, true]
+      while (R.c0 > 0 && colFilled(R.c0 - 1, R.r0 - 1, R.r1 + 1)) [R.c0, grew] = [R.c0 - 1, true]
+      while (R.c1 < d.maxCol && colFilled(R.c1 + 1, R.r0 - 1, R.r1 + 1)) [R.c1, grew] = [R.c1 + 1, true]
+    }
+    let header = false
+    if (R.r1 > R.r0) {
+      const xfs = this.wb.styles.xfs
+      const text = (e: Entry | null) => !!e && (e[0] === T_STR || e[0] === T_SST)
+      const bold = (e: Entry | null) => Number((xfs[e?.[2] ?? 0]?.css as { fontWeight?: number | string } | undefined)?.fontWeight ?? 400) >= 600
+      let labels = 0
+      let overValues = false
+      let allBold = true
+      let belowBold = false
+      for (let c = R.c0; c <= R.c1; c++) {
+        const top = getEntry(d, R.r0, c)
+        const below = getEntry(d, R.r0 + 1, c)
+        const topFilled = !!top && top[0] !== T_EMPTY && top[1] !== ''
+        if (topFilled) {
+          if (!text(top) || d.formulas.has(R.r0 * MAX_COL + c)) {
+            labels = -Infinity
+            break
+          }
+          labels++
+          if (!bold(top)) allBold = false
+        }
+        if (below && below[0] !== T_EMPTY && below[1] !== '') {
+          if (!text(below) || d.formulas.has((R.r0 + 1) * MAX_COL + c)) overValues = true
+          if (bold(below)) belowBold = true
+        }
+      }
+      header = labels > 0 && (overValues || (allBold && !belowBold))
+    }
+    return { range: R, header }
+  }
+
+  /**
+   * Clears the contents of every cell of `range` (formats stay), in one undo step. Every cell: also those of rows
+   * the view has not shown yet (a whole column selected, the whole sheet).
+   */
+  private async clear(sheet: number, d: SheetData, range: Range): Promise<XlsxEditResult> {
+    const R = this.used(d, range)
+    const inputs: CellInput[] = []
+    const scan = (r: number, row: unknown[] | undefined) => {
+      if (!row) return
+      for (let k = 0; k < row.length; k += 4) {
+        const c = row[k] as number
+        if (c < R.c0 || c > R.c1) continue
+        if (row[k + 1] === T_EMPTY && !d.formulas.has(r * MAX_COL + c)) continue
+        inputs.push({ r, c, input: '' })
+      }
+    }
+    if (d.pages) {
+      // a sheet read from its file by pages: each page read for the look
+      const size = d.pages.size
+      for (let p = Math.floor(R.r0 / size); p * size <= R.r1 && inputs.length <= MAX_CELLS_AT_ONCE; p++) {
+        const rows = await d.pages.peek(p)
+        for (let k = 0; k < rows.length; k++) if (p * size + k >= R.r0 && p * size + k <= R.r1) scan(p * size + k, rows[k])
+      }
+    } else for (let r = R.r0; r <= R.r1 && inputs.length <= MAX_CELLS_AT_ONCE; r++) scan(r, d.rows[r])
+    if (inputs.length > MAX_CELLS_AT_ONCE) throw new Error(`Too many cells to clear at once (over ${MAX_CELLS_AT_ONCE.toLocaleString()}): clear fewer rows or columns at a time, or delete them`)
+    return inputs.length ? this.setCells(sheet, inputs) : { sheet, range }
+  }
+
+  /**
+   * The cells of `range` as they are now, for `paste` (values, formulas, formats), and as text for other programs
+   * (the values as shown, tab separated). Up to the last cell the sheet has: a whole column selected is copied
+   * whole, the rows not shown yet included.
+   */
+  async copy(sheet: number, range: Range): Promise<XlsxClip> {
+    await this.ready()
+    const d = this.sheet(sheet)
+    const R = this.used(d, range)
+    const h = Math.max(1, R.r1 - R.r0 + 1)
+    const w = Math.max(1, R.c1 - R.c0 + 1)
+    if (h * w > MAX_CELLS_AT_ONCE * 4) throw new Error(`Too many cells to copy at once (${(h * w).toLocaleString()})`)
+    await this.wb.ensure(d, R.r0, R.r0 + h - 1)
+    const cells: ClipCell[][] = []
+    const lines: string[] = []
+    let filled = 0
+    for (let r0 = R.r0; r0 < R.r0 + h; r0 += 4096) {
+      const r1 = Math.min(R.r0 + h, r0 + 4096)
+      const shown = new Map<number, Map<number, string>>()
+      for (const row of (await this.wb.block(sheet, r0, r1)).rows) shown.set(row.r, new Map(row.cells.map((c) => [c[0], c[1]])))
+      for (let r = r0; r < r1; r++) {
+        const line: ClipCell[] = []
+        const text: string[] = []
+        for (let c = R.c0; c < R.c0 + w; c++) {
+          const e = getEntry(d, r, c)
+          const f = d.formulas.get(r * MAX_COL + c)
+          // (a shared string by its text: its number means something in this workbook only)
+          line.push(e || f !== undefined ? [e ? (e[0] === T_SST ? T_STR : e[0]) : T_EMPTY, e ? (e[0] === T_SST ? (this.wb.sst[e[1] as number] ?? '') : e[1]) : '', e?.[2] ?? 0, ...(f !== undefined ? [f] : [])] as ClipCell : null)
+          if (e || f !== undefined) filled++
+          text.push(tsvCell(shown.get(r)?.get(c) ?? ''))
+        }
+        cells.push(line)
+        lines.push(text.join('\t'))
+      }
+    }
+    if (filled > MAX_CELLS_AT_ONCE) throw new Error(`Too many cells to copy at once (${filled.toLocaleString()})`)
+    return { text: lines.join('\n'), sheet: this.wb.sheets[sheet].path, range: { r0: R.r0, c0: R.c0, r1: R.r0 + h - 1, c1: R.c0 + w - 1 }, cells }
+  }
+
+  /**
+   * Writes copied cells with their top left at `at`, in one undo step: values as they were, formats, formulas.
+   * A copied formula reads the cells at the same distance from it as before. Cells that were cut (`moved`: they
+   * are cleared where they were already): their formulas read the cells they read, and whatever read the cells
+   * cut reads them where they are now.
+   */
+  private async paste(sheet: number, d: SheetData, op: Extract<SheetOp, { op: 'paste' }>): Promise<XlsxEditResult> {
+    const { r0, c0 } = op.range
+    const h = op.cells.length
+    const w = Math.max(0, ...op.cells.map((row) => row.length))
+    if (r0 + h > MAX_ROWS || c0 + w > MAX_COL) throw new Error('The cells copied do not fit there: they would run past the last row or column of the sheet')
+    if (h * w > MAX_CELLS_AT_ONCE * 4) throw new Error(`Too many cells to paste at once (${(h * w).toLocaleString()})`)
+    await this.wb.ensure(d, r0, r0 + h - 1)
+    const dr = r0 - op.from.r0
+    const dc = c0 - op.from.c0
+    const here = this.wb.sheets[sheet].name
+    const src = this.wb.sheets.find((x) => x.path === op.from.sheet)
+    const move: MoveOp | undefined = op.moved && src ? { from: src.name, to: here, r0: op.from.r0, c0: op.from.c0, r1: op.from.r0 + h - 1, c1: op.from.c0 + w - 1, dr, dc } : undefined
+    const styles = this.wb.styles.xfs.length
+    const changes: CellChange[] = []
+    for (let i = 0; i < h; i++) {
+      for (let j = 0; j < w; j++) {
+        const cell = op.cells[i][j] ?? null
+        const r = r0 + i
+        const c = c0 + j
+        const key = r * MAX_COL + c
+        const prev = getEntry(d, r, c)
+        const prevF = d.formulas.get(key)
+        if (!cell && !prev && prevF === undefined) continue
+        const f = cell?.[3]
+        const nextF = f === undefined ? undefined : move ? moveRefsInFormula(f, move, here, move.from) : translateFormula(f, dr, dc)
+        // (a format this workbook does not have: one of another document, or a broken operation)
+        const st = cell && Number.isInteger(cell[2]) && cell[2] >= 0 && cell[2] < styles ? cell[2] : 0
+        const next: Entry | null = !cell ? null : nextF !== undefined ? [T_STR, '=' + nextF, st] : clipEntry(cell, st)
+        changes.push({ key, prev, prevF, next, nextF })
+      }
+    }
+    // what read the cells cut reads them here (the formulas pasted have theirs already)
+    const others: NonNullable<Change['others']> = []
+    if (move) {
+      const pasted = new Set(changes.map((ch) => ch.key))
+      for (const [i, od] of this.wb.sheetsData) {
+        const name = this.wb.sheets[i]?.name
+        if (name === undefined) continue
+        for (const [key, f] of od.formulas) {
+          if (od === d && pasted.has(key)) continue
+          const g = moveRefsInFormula(f, move, name)
+          if (g !== f) others.push({ sheet: i, key, prev: f, next: g })
+        }
+      }
+      for (const o of others) setFormula(this.wb.sheetsData.get(o.sheet)!, o.key, o.next)
+    }
+    this.apply(d, changes, 'next')
+    const res = this.record(sheet, changes, { r0, c0, r1: r0 + h - 1, c1: c0 + w - 1 })
+    if (others.length) {
+      this.undoStack[this.undoStack.length - 1].others = others
+      res.recalc = this.recalcAll()
+    }
+    return res
+  }
+
   /** replaces `query` in matching cells (one undo step); `at` limits it to one cell */
   async replace(sheet: number, query: string, by: string, opts: FindOptions = {}, at?: { r: number; c: number }): Promise<XlsxEditResult | null> {
+    await this.ready()
     const d = this.sheet(sheet)
     const re = new RegExp(opts.whole ? `^${escRe(query)}$` : escRe(query), opts.matchCase ? 'g' : 'gi')
     const inputs: CellInput[] = []
@@ -725,7 +1037,7 @@ export class XlsxEditor {
   }
 
   private fill(sheet: number, d: SheetData, range: Range, dir: 'down' | 'right'): XlsxEditResult {
-    materializeShared(d)
+    expandShared(d)
     const changes: CellChange[] = []
     for (let r = range.r0; r <= range.r1; r++) {
       for (let c = range.c0; c <= range.c1; c++) {
@@ -744,7 +1056,7 @@ export class XlsxEditor {
   }
 
   private sort(sheet: number, d: SheetData, range: Range, col: number, desc: boolean): XlsxEditResult {
-    materializeShared(d)
+    expandShared(d)
     const rows: { r: number; cells: (Entry | null)[]; f: (string | undefined)[]; key: unknown }[] = []
     for (let r = range.r0; r <= range.r1; r++) {
       const cells: (Entry | null)[] = []
@@ -787,13 +1099,23 @@ export class XlsxEditor {
   // ---------------------------------------------------------------- workbook (sheet list)
 
   async bookOp(op: BookOp): Promise<XlsxEditResult> {
+    await this.ready()
     const pkg = this.wb.pkg
     const nodes = parseRaw(await pkg.text(this.wb.mainPath))
     const root = rootEl(nodes)!
     const P = prefixOf(root.q)
     const sheetsEl = kidOf(root, 'sheets')!
-    const entries = kidsOf(sheetsEl, 'sheet')
+    // every sheet the workbook lists: among them the chart, dialog and macro sheets, which `sheets` does not hold
+    const listed = kidsOf(sheetsEl, 'sheet')
+    const rels = await pkg.rels(this.wb.mainPath)
     const sheets = this.wb.sheets
+    /** the workbook's entry of worksheet `i` */
+    const entry = (i: number): RNode => {
+      const path = sheets[i]?.path
+      const e = path === undefined ? undefined : listed.find((x) => rels.get(getAttr(x, 'id', true) ?? '')?.target === path)
+      if (!e) throw new Error(`No sheet #${i}`)
+      return e
+    }
     const remap = (order: number[]) => {
       // order[newIndex] = oldIndex
       const data = new Map(this.wb.sheetsData)
@@ -805,19 +1127,42 @@ export class XlsxEditor {
       const next = order.map((old, i) => ({ ...sheets[old], index: i }))
       sheets.splice(0, sheets.length, ...next)
     }
+    const names = kidsOf(kidOf(root, 'definedNames'), 'definedName')
+    /** rewrites the formulas of every sheet and of the defined names */
+    const eachFormula = (fn: (f: string) => string) => {
+      for (const d of this.wb.sheetsData.values()) {
+        const edits: [number, string][] = []
+        for (const [k, f] of d.formulas) {
+          const g = fn(f)
+          if (g !== f) edits.push([k, g])
+        }
+        for (const [k, g] of edits) setFormula(d, k, g)
+        if (edits.length) this.formulaTouched = true
+      }
+      for (const n of names) {
+        const f = textContent(n)
+        const g = fn(f)
+        if (g !== f) n.c = [escText(g)]
+      }
+    }
+    let recalc: number[] | undefined
     switch (op.op) {
       case 'add': {
+        const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData/></worksheet>'
         const path = pkg.freeName('xl/worksheets', 'sheet', 'xml')
-        this.newSheets.set(path, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData/></worksheet>')
-        pkg.setPart(path, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData/></worksheet>')
+        this.newSheets.set(path, xml)
+        pkg.setPart(path, xml)
         await pkg.setContentType(path, 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml')
         const rid = await pkg.addRel(this.wb.mainPath, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet', path)
-        const ids = entries.map((e) => Number(getAttr(e, 'sheetId') ?? 0))
-        let name = op.name ?? `Sheet${sheets.length + 1}`
-        while (sheets.some((s) => s.name.toLowerCase() === name.toLowerCase())) name += '_'
+        const ids = listed.map((e) => Number(getAttr(e, 'sheetId') ?? 0))
+        // no two sheets of the workbook by one name, the ones not shown here (chart sheets) included
+        const taken = new Set(listed.map((e) => (getAttr(e, 'name') ?? '').toLowerCase()))
+        let name = sheetName(op.name ?? '') || `Sheet${sheets.length + 1}`
+        for (let n = 2; taken.has(name.toLowerCase()); n++) name = op.name ? `${sheetName(op.name).slice(0, 31 - String(n).length - 1)}_${n}` : `Sheet${sheets.length + n}`
         const node = el(P + 'sheet', { name, sheetId: String(Math.max(0, ...ids) + 1), ...relIdAttrs(root, 'id', rid) })
-        const after = op.after ?? sheets.length - 1
-        const at = after + 1 >= entries.length ? sheetsEl.c.length : sheetsEl.c.indexOf(entries[after + 1])
+        const after = Math.max(-1, Math.min(op.after ?? sheets.length - 1, sheets.length - 1))
+        // right after the worksheet it follows (chart sheets may stand between the worksheets of the list)
+        const at = !sheets.length ? sheetsEl.c.length : after < 0 ? sheetsEl.c.indexOf(entry(0)) : sheetsEl.c.indexOf(entry(after)) + 1
         sheetsEl.c.splice(at, 0, node)
         sheetsEl.self = false
         const info = { name, index: after + 1, path, hidden: false }
@@ -829,17 +1174,20 @@ export class XlsxEditor {
       }
       case 'rename': {
         const old = sheets[op.index]
-        const name = op.name.trim().slice(0, 31).replace(/[\\/?*[\]:]/g, '_')
-        if (!old || !name || sheets.some((s, i) => i !== op.index && s.name.toLowerCase() === name.toLowerCase())) throw new Error('Invalid sheet name')
-        setAttr(entries[op.index], 'name', name)
-        for (const s of await this.allSheets()) {
-          for (const [k, f] of s.d.formulas) {
-            const g = renameSheetInFormula(f, old.name, name)
-            if (g !== f) {
-              s.d.formulas.set(k, g)
-              s.d.edited.add(k)
-            }
-          }
+        const name = sheetName(op.name)
+        if (!old || !name) throw new Error('Invalid sheet name')
+        const node = entry(op.index)
+        if (listed.some((e) => e !== node && (getAttr(e, 'name') ?? '').toLowerCase() === name.toLowerCase())) throw new Error('Invalid sheet name')
+        setAttr(node, 'name', name)
+        // what reads the sheet names it as it is called now: the formulas, and the defined names (print areas, named ranges)
+        eachFormula((f) => renameSheetInFormula(f, old.name, name))
+        await renameInCharts(pkg, old.name, name)
+        // validations and conditional formats naming it: the sheets that hold some are written again, with its name of now
+        for (const s of sheets) {
+          const d = this.wb.sheetsData.get(s.index)
+          if (!d) continue
+          d.renames.push([old.name, name])
+          if (!this.newSheets.has(s.path) && !needsWrite(d) && (await sheetTail(pkg, s.path).catch(() => '')).toLowerCase().includes(old.name.toLowerCase())) d.formulaChanged = true
         }
         old.name = name
         break
@@ -847,6 +1195,7 @@ export class XlsxEditor {
       case 'delete': {
         if (sheets.length <= 1) throw new Error('A workbook needs at least one sheet')
         const s = sheets[op.index]
+        const node = entry(op.index)
         // its comments go with it
         for (const t of this.wb.comments.threads()) {
           const a = t.root.at
@@ -854,34 +1203,41 @@ export class XlsxEditor {
           for (const r of t.replies) this.wb.comments.set(r.id, null)
           this.wb.comments.set(t.root.id, null)
         }
-        sheetsEl.c.splice(sheetsEl.c.indexOf(entries[op.index]), 1)
+        sheetsEl.c.splice(sheetsEl.c.indexOf(node), 1)
         pkg.setPart(s.path, null)
         if (pkg.has(relsPathFor(s.path))) pkg.setPart(relsPathFor(s.path), null)
         await pkg.removeRelsTo(this.wb.mainPath, s.path)
         await pkg.setContentType(s.path, null)
+        this.wb.sheetsData.delete(op.index)
         remap(sheets.map((_, i) => i).filter((i) => i !== op.index))
-        // localSheetId indexes in definedNames would now be off; drop the ones of the deleted sheet
-        const dn = kidOf(root, 'definedNames')
-        if (dn) dn.c = dn.c.filter((c) => !(isNode(c) && getAttr(c, 'localSheetId') === String(op.index)))
+        // what read the sheet reads #REF! from now on, as Excel has it: a reference to a sheet the workbook does not have is not a formula it opens
+        eachFormula((f) => dropSheetInFormula(f, s.name))
+        this.wb.calc.invalidate()
+        recalc = this.recalcAll()
         break
       }
       case 'move': {
-        const node = entries[op.from]
+        const node = entry(op.from)
         sheetsEl.c.splice(sheetsEl.c.indexOf(node), 1)
-        const rest = kidsOf(sheetsEl, 'sheet')
-        sheetsEl.c.splice(op.to >= rest.length ? sheetsEl.c.length : sheetsEl.c.indexOf(rest[op.to]), 0, node)
+        // before the worksheet that is at `to` once it is taken out, or after the last one
+        const rest = sheets.filter((_, i) => i !== op.from).map((x) => listed.find((e) => rels.get(getAttr(e, 'id', true) ?? '')?.target === x.path)!)
+        const to = Math.max(0, Math.min(op.to, rest.length))
+        sheetsEl.c.splice(to < rest.length ? sheetsEl.c.indexOf(rest[to]) : rest.length ? sheetsEl.c.indexOf(rest[rest.length - 1]) + 1 : sheetsEl.c.length, 0, node)
         const order = sheets.map((_, i) => i)
         order.splice(op.from, 1)
-        order.splice(op.to, 0, op.from)
+        order.splice(to, 0, op.from)
         remap(order)
         break
       }
     }
+    relist(root, listed)
     pkg.setPart(this.wb.mainPath, serialize(nodes))
     this.bookChanged = true
     this.undoStack = []
     this.redoStack = []
-    return { sheet: 0, range: { r0: 0, c0: 0, r1: 0, c1: 0 }, sheets: sheets.map((s) => ({ ...s })) }
+    // sheets are known to the formulas by their place in the list and by their name: both changed
+    this.wb.calc.invalidate()
+    return { sheet: 0, range: { r0: 0, c0: 0, r1: 0, c1: 0 }, sheets: sheets.map((s) => ({ ...s })), ...(recalc ? { recalc } : {}) }
   }
 
   private bookChanged = false
@@ -893,7 +1249,7 @@ export class XlsxEditor {
    * when it is loaded, like a sheet's XML does. `name` defaults to the file's name.
    */
   async importText(after: number, imp: DelimitedImport, name?: string): Promise<XlsxEditResult> {
-    const base = (name ?? imp.source.name ?? '').replace(/\.[^./\\]+$/, '').replace(/[\\/?*[\]:]/g, '_').slice(0, 31).trim() || 'Imported'
+    const base = sheetName((name ?? imp.source.name ?? '').replace(/\.[^./\\]+$/, '')) || 'Imported'
     const res = await this.bookOp({ op: 'add', name: base, after })
     this.wb.loaders.set(this.wb.sheets[after + 1].path, (d, report) => loadDelimited(d, imp, report))
     return res
@@ -974,7 +1330,8 @@ export class XlsxEditor {
     }
     const rowCols = new Map<number, Set<number>>()
     for (const r of d.dirtyRows) if (!rowCols.has(r)) rowCols.set(r, new Set())
-    for (const key of [...d.edited, ...fix.keys()]) {
+    // the cells edited, those whose shared formula lost its first cell, and those a formula gave another value
+    for (const key of [...d.edited, ...fix.keys(), ...d.revalued]) {
       const r = Math.floor(key / MAX_COL)
       let s = rowCols.get(r)
       if (!s) rowCols.set(r, (s = new Set()))
@@ -984,7 +1341,7 @@ export class XlsxEditor {
     const enc = new TextEncoder()
     return new ReadableStream<Uint8Array>({
       async start(ctrl) {
-        const rw = new RowPatcher(rows, rowCols, d, fix, wb)
+        const rw = new RowPatcher(rows, rowCols, d, fix, wb, wb.sheets.find((s) => s.path === path)?.name ?? '')
         const base = self.newSheets.get(path)
         const reader = (base !== undefined ? new Blob([base]).stream() : await pkg.zip.stream(path)).getReader()
         const dec = new TextDecoder()
@@ -1000,6 +1357,55 @@ export class XlsxEditor {
   }
 }
 
+/**
+ * A name a sheet can have: at most 31 characters, none of \ / ? * [ ] :, and no apostrophe at either end (Excel
+ * refuses those; a name ending with one cannot be quoted in a formula, and other programs drop the sheet).
+ */
+function sheetName(raw: string): string {
+  return raw.trim().slice(0, 31).replace(/[\\/?*[\]:]/g, '_').replace(/^'|'$/g, '_').trim()
+}
+
+/**
+ * After the list of sheets changed: `localSheetId` of the defined names, and `activeTab` / `firstSheet` of the
+ * views, count the sheets of the list (`listed`: as it was). They follow their sheet to its new place; a name local
+ * to a sheet that is gone goes with it, a view showing it shows the sheet that took its place.
+ */
+function relist(root: RNode, listed: RNode[]) {
+  const now = kidsOf(kidOf(root, 'sheets'), 'sheet')
+  const to = (old: number) => now.indexOf(listed[old])
+  const dn = kidOf(root, 'definedNames')
+  if (dn) {
+    dn.c = dn.c.filter((c) => {
+      if (!isNode(c)) return true
+      const id = getAttr(c, 'localSheetId')
+      if (id === undefined) return true
+      const i = to(Number(id))
+      if (i < 0) return false
+      setAttr(c, 'localSheetId', String(i))
+      return true
+    })
+    if (!kidsOf(dn).length) root.c.splice(root.c.indexOf(dn), 1)
+  }
+  const shown = (i: number) => {
+    const st = now[i] && getAttr(now[i], 'state')
+    return !!now[i] && (!st || st === 'visible')
+  }
+  for (const v of kidsOf(kidOf(root, 'bookViews'), 'workbookView')) {
+    for (const a of ['activeTab', 'firstSheet']) {
+      const old = getAttr(v, a)
+      if (old === undefined) continue
+      let i = to(Number(old))
+      if (i < 0) {
+        i = Math.max(0, Math.min(Number(old) || 0, now.length - 1))
+        // a sheet that shows, the nearest: first the ones after
+        const near = [...now.keys()].filter(shown).sort((x, y) => Math.abs(x - i) - Math.abs(y - i) || y - x)[0]
+        if (near !== undefined) i = near
+      }
+      setAttr(v, a, String(i))
+    }
+  }
+}
+
 function cellXml(d: SheetData, r: number, c: number, P: string, wb: XlsxWorkbook): string {
   const key = r * MAX_COL + c
   const e = getEntry(d, r, c)
@@ -1009,7 +1415,8 @@ function cellXml(d: SheetData, r: number, c: number, P: string, wb: XlsxWorkbook
   const s = e?.[2] ? ` s="${e[2]}"` : ''
   if (f) {
     const [t, v] = e ?? [T_EMPTY, '']
-    const fx = `<${P}f>${escText(f)}</${P}f>`
+    const arr = d.arrays.get(key)
+    const fx = `<${P}f${arr ? ` t="array" ref="${colName(arr.c0)}${arr.r0 + 1}:${colName(arr.c1)}${arr.r1 + 1}"` : ''}>${escText(withFunctionPrefixes(f))}</${P}f>`
     if (t === T_NUM) return `<${P}c r="${ref}"${s}>${fx}<${P}v>${String(v)}</${P}v></${P}c>`
     if (t === T_BOOL) return `<${P}c r="${ref}"${s} t="b">${fx}<${P}v>${v ? 1 : 0}</${P}v></${P}c>`
     if (t === T_ERR) return `<${P}c r="${ref}"${s} t="e">${fx}<${P}v>${escText(String(v))}</${P}v></${P}c>`
@@ -1037,7 +1444,24 @@ function cellXml(d: SheetData, r: number, c: number, P: string, wb: XlsxWorkbook
 }
 
 function needsWrite(d: SheetData): boolean {
-  return d.edited.size > 0 || d.structural || d.dirtyCols || d.dirtyMerges || d.dirtyView || d.dirtyRows.size > 0 || d.formulaChanged
+  return d.edited.size > 0 || d.structural || d.dirtyCols || d.dirtyMerges || d.dirtyView || d.dirtyRows.size > 0 || d.formulaChanged || d.revalued.size > 0
+}
+
+/** gives the cell of a file the value its formula has now (the formula, the format and the rest of it stay as they are) */
+function revalue(cell: RNode, e: Entry | null, P: string, wb: XlsxWorkbook) {
+  if (!e) return
+  const [t, v] = e
+  let type: string | undefined
+  let text: string
+  if (t === T_NUM) text = String(v)
+  else if (t === T_BOOL) [type, text] = ['b', v ? '1' : '0']
+  else if (t === T_ERR) [type, text] = ['e', String(v)]
+  else if (t === T_SST || t === T_STR) [type, text] = ['str', t === T_SST ? (wb.sst[v as number] ?? '') : String(v)]
+  else return
+  setAttr(cell, 't', type)
+  cell.c = cell.c.filter((c) => !(isNode(c) && (local(c.q) === 'v' || local(c.q) === 'is')))
+  cell.c.splice(cell.c.findIndex((c) => isNode(c) && local(c.q) === 'f') + 1, 0, el(P + 'v', {}, [escText(text)]))
+  cell.self = false
 }
 
 function layoutState(d: SheetData): LayoutState {
@@ -1127,6 +1551,7 @@ class RowPatcher {
     private d: SheetData,
     private fix: Map<number, string>,
     private wb: XlsxWorkbook,
+    private sheetName: string,
   ) {}
 
   private newRow(r: number): string {
@@ -1221,16 +1646,28 @@ class RowPatcher {
 
   private tailFix(tail: string): string {
     const d = this.d
+    // filters, links, validations, conditional formats: with the rows / columns that moved, the sheets that were renamed
+    tail = followSheetTail(tail, d.shifts, d.renames, this.sheetName)
     if (!d.dirtyMerges && !d.structural) return tail
     const P = this.P
     const ms = d.merges
     const xml = ms.length ? `<${P}mergeCells count="${ms.length}">${ms.map((m) => `<${P}mergeCell ref="${colName(m.c0)}${m.r0 + 1}:${colName(m.c1)}${m.r1 + 1}"/>`).join('')}</${P}mergeCells>` : ''
     const re = new RegExp(`<${P}mergeCells\\b[\\s\\S]*?<\\/${P}mergeCells>|<${P}mergeCells\\b[^>]*\\/>`)
     if (re.test(tail)) return tail.replace(re, xml)
-    // after the elements that precede mergeCells in the schema
+    // after the elements that precede mergeCells in the schema: each skipped whole, with what it holds (a filter holds its sort state)
     let at = 0
-    const before = /<(\w+:)?(sheetCalcPr|sheetProtection|protectedRanges|scenarios|autoFilter|sortState|dataConsolidate|customSheetViews)\b[\s\S]*?(\/>|<\/(\w+:)?\2>)/g
-    for (let m = before.exec(tail); m; m = before.exec(tail)) at = m.index + m[0].length
+    const open = /\s*<([\w.-]+:)?(sheetCalcPr|sheetProtection|protectedRanges|scenarios|autoFilter|sortState|dataConsolidate|customSheetViews)\b(?:[^>"']|"[^"]*"|'[^']*')*>/y
+    for (;;) {
+      open.lastIndex = at
+      const m = open.exec(tail)
+      if (!m) break
+      at = m.index + m[0].length
+      if (m[0].endsWith('/>')) continue
+      const close = `</${m[1] ?? ''}${m[2]}>`
+      const end = tail.indexOf(close, at)
+      if (end < 0) break
+      at = end + close.length
+    }
     return tail.slice(0, at) + xml + tail.slice(at)
   }
 
@@ -1370,21 +1807,26 @@ class RowPatcher {
         const xml = cellXml(this.d, r, c, P, this.wb)
         if (at !== undefined) replacements.set(at, xml)
         else if (xml) inserts.push({ c, node: xml })
-      } else if (at !== undefined && this.fix.has(key)) {
+      } else if (at !== undefined) {
         const cell = row.c[at] as RNode
         const f = kidOf(cell, 'f')
-        if (f) {
+        if (f && this.fix.has(key)) {
           f.a = ''
           f.c = [escText(this.fix.get(key)!)]
           f.self = false
         }
+        if (this.d.revalued.has(key)) revalue(cell, getEntry(this.d, r, c), P, this.wb)
+      } else if (this.d.revalued.has(key)) {
+        // a cell an array formula fills that the file did not have
+        const xml = cellXml(this.d, r, c, P, this.wb)
+        if (xml) inserts.push({ c, node: xml })
       }
     }
     for (const [i, x] of replacements) row.c[i] = x
     if (inserts.length) {
-      // place new cells before the first existing cell with a greater column
+      // place new cells before the first existing cell with a greater column, in column order (cells out of order are not a workbook)
       const ordered = [...pos.entries()].sort((a, b) => a[0] - b[0])
-      for (const ins of inserts.reverse()) {
+      for (const ins of inserts) {
         const after = ordered.find(([c]) => c > ins.c)
         const idx = after ? after[1] : row.c.length
         row.c.splice(idx, 0, ins.node)

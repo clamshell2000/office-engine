@@ -130,6 +130,20 @@ export interface XlsxEditResult {
   recalc?: number[]
 }
 
+/** a copied cell: kind of value (as the workbook holds it: number, text, boolean, error…), value, format, formula (no "=") */
+export type ClipCell = [type: number, value: number | string, style: number, formula?: string] | null
+
+/** cells copied from a sheet (`xlsx.copy`): what the `paste` sheet operation writes, and what goes to the clipboard */
+export interface XlsxClip {
+  /** the values as shown, tab separated, a line per row: for other programs */
+  text: string
+  /** path of the sheet they are from */
+  sheet: string
+  range: Range
+  /** by row, then column */
+  cells: ClipCell[][]
+}
+
 export type SheetOp =
   | { op: 'insertRows' | 'deleteRows' | 'insertCols' | 'deleteCols'; at: number; n: number }
   | { op: 'merge' | 'unmerge'; range: Range; mode?: 'all' | 'across' | 'down' }
@@ -139,6 +153,13 @@ export type SheetOp =
   | { op: 'rowHeight'; r0: number; r1: number; px: number }
   | { op: 'freeze'; rows: number; cols: number }
   | { op: 'fill'; range: Range; dir: 'down' | 'right' }
+  /** clears the contents of every cell of the range (the rows not shown yet included); formats stay */
+  | { op: 'clear'; range: Range }
+  /**
+   * Writes copied cells (`xlsx.copy`) with their top left at that of `range`: values, formats, formulas. `from`: where
+   * they were copied; `moved`: they were cut (and cleared there): references to them follow them here.
+   */
+  | { op: 'paste'; range: Range; cells: ClipCell[][]; from: { sheet: string; r0: number; c0: number }; moved?: boolean }
   | { op: 'sort'; range: Range; col: number; desc?: boolean }
 
 export type BookOp =
