@@ -86,6 +86,8 @@ export class PptxEditor implements RichHost<EPara> {
   private pend: { s: Partial<RunStyle>; d: PRunSet; at: { pa: string; o: number } } | null = null
   private timer: ReturnType<typeof setTimeout> | undefined
   private changedSinceCommit = false
+  private commits: { slide: number; sid: number; specs: PParaSpec[] }[] = []
+  private committing?: Promise<void>
   onChange?: () => void
   onCommitted?: (slide: number, model: SlideModel) => void
   onDirty?: () => void
@@ -111,7 +113,8 @@ export class PptxEditor implements RichHost<EPara> {
   }
 
   end() {
-    if (this.sid >= 0 && this.changedSinceCommit) this.commit()
+    clearTimeout(this.timer)
+    if (this.sid >= 0 && this.changedSinceCommit) this.commitInBackground()
     this.input.detach()
     this.sid = -1
     this.slide = -1
@@ -194,7 +197,7 @@ export class PptxEditor implements RichHost<EPara> {
     this.changedSinceCommit = true
     this.onDirty?.()
     clearTimeout(this.timer)
-    this.timer = setTimeout(() => this.commit(), 400)
+    this.timer = setTimeout(() => this.commitInBackground(), 400)
     this.onChange?.()
     this.onState?.(this.state(sel))
   }
@@ -215,29 +218,54 @@ export class PptxEditor implements RichHost<EPara> {
     this.paras = paras
     this.pendingSel = sel
     this.changedSinceCommit = true
+    this.onDirty?.()
     clearTimeout(this.timer)
-    this.timer = setTimeout(() => this.commit(), 400)
+    this.timer = setTimeout(() => this.commitInBackground(), 400)
     this.onChange?.()
     this.onState?.(this.state(sel))
   }
 
-  commit() {
+  private commitInBackground() {
+    void this.commit().catch((e) => console.error('[office-engine] slide edit failed', e))
+  }
+
+  /** Flush the debounce and any edits made while an earlier commit was in flight. */
+  async flush() {
+    do {
+      await this.commit()
+    } while (this.changedSinceCommit || this.commits.length)
+  }
+
+  commit(): Promise<void> {
     clearTimeout(this.timer)
-    if (this.sid < 0 || !this.changedSinceCommit) return
-    this.changedSinceCommit = false
-    const slide = this.slide
-    const specs: PParaSpec[] = this.paras.map((p) => ({
-      k: p.k,
-      algn: p.algnSet ? p.algn : undefined,
-      ...p.pp,
-      runs: p.runs.map((r) =>
-        r.t === 'fld' ? { text: '', src: r.src as [number, number], fld: true } : { text: r.text ?? '', src: r.src as [number, number] | undefined, set: r.d as PRunSet | undefined },
-      ),
-    }))
-    this.client
-      .call('pptx.setText', slide, this.sid, specs)
-      .then((m) => this.onCommitted?.(slide, m))
-      .catch((e) => console.error('[office-engine] slide edit failed', e))
+    if (this.sid >= 0 && this.changedSinceCommit) {
+      this.changedSinceCommit = false
+      const specs: PParaSpec[] = this.paras.map((p) => ({
+        k: p.k,
+        algn: p.algnSet ? p.algn : undefined,
+        ...p.pp,
+        runs: p.runs.map((r) =>
+          r.t === 'fld' ? { text: '', src: r.src as [number, number], fld: true } : { text: r.text ?? '', src: r.src as [number, number] | undefined, set: r.d as PRunSet | undefined },
+        ),
+      }))
+      this.commits.push({ slide: this.slide, sid: this.sid, specs })
+    }
+    if (!this.committing) {
+      this.committing = this.drainCommits().finally(() => {
+        this.committing = undefined
+      })
+    }
+    return this.committing
+  }
+
+  private async drainCommits() {
+    while (this.commits.length) {
+      const { slide, sid, specs } = this.commits[0]
+      const model = await this.client.call('pptx.setText', slide, sid, specs)
+      // Retain a failed snapshot for retry, including after the active shape changes.
+      this.commits.shift()
+      this.onCommitted?.(slide, model)
+    }
   }
 
   // ---------------------------------------------------------------- formatting
