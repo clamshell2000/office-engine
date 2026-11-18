@@ -43,21 +43,34 @@ export const MAX_XML_DEPTH = 1024
 
 export const tooDeep = () => new Error(`XML nested deeper than ${MAX_XML_DEPTH} elements`)
 
+/** characters an unfinished tag may run to before the file is refused (a tag is held whole: its attributes are read together) */
+const MAX_XML_TAG = 16 * 1024 * 1024
+
 export class SaxParser {
+  /** what of the last chunk waits for the next one: the start of a token, a few characters at most */
   private buf = ''
   private depth = 0
   private skipDepth = -1
   private relPrefixes = new Set<string>(['r'])
   /**
-   * Characters at the start of `buf` (an unfinished token) already searched for its end, and the quote the tag scan
-   * was inside: the next chunk resumes there, so a token split over many chunks is scanned once, not once per chunk.
+   * Inside a comment, a processing instruction, a declaration or a CDATA section that ends in a later chunk: what
+   * ends it. Its content is passed on (or dropped) chunk by chunk, never held: a comment of 300 MB costs nothing.
    */
-  private hint = 0
-  private hintQ = 0
+  private until = ''
+  private cdata = false
+  /**
+   * A tag that ends in a later chunk: its pieces so far, joined when the end comes (so it is read once, however many
+   * chunks it spans), their length, and the quote its end is looked for inside.
+   */
+  private tag: string[] | null = null
+  private tagLen = 0
+  private tagQuote = 0
+  private tagQuoted = false
 
   /**
    * @param raw optional tap receiving every consumed source segment verbatim (tags, text, comments…),
-   *   called right before the matching handler event. Used for byte-preserving rewrites.
+   *   called right before the matching handler event. Used for byte-preserving rewrites. A long text or comment
+   *   comes in several segments.
    */
   constructor(
     private h: SaxHandler,
@@ -65,35 +78,110 @@ export class SaxParser {
   ) {}
 
   write(chunk: string): void {
-    this.buf = this.buf.length ? this.buf + chunk : chunk
-    this.run(false)
+    if (!chunk) return
+    if (this.tag) {
+      // only the new characters are looked at, for the end of the tag
+      if (this.tagEnd(chunk) < 0) {
+        this.tag.push(chunk)
+        this.tagLen += chunk.length
+        if (this.tagLen > MAX_XML_TAG) throw new Error(`XML tag longer than ${MAX_XML_TAG >> 20} MB`)
+        return
+      }
+      chunk = this.tag.join('') + chunk
+      this.tag = null
+    } else if (this.buf) chunk = this.buf + chunk
+    this.buf = ''
+    this.run(chunk, false)
   }
 
   end(): void {
-    this.run(true)
+    const s = this.buf
     this.buf = ''
+    this.run(s, true)
+    this.buf = ''
+    this.until = ''
+    this.cdata = false
+    this.tag = null
   }
 
-  private run(final: boolean) {
-    const s = this.buf
+  /** index of the `>` that ends the unfinished tag in `chunk`, -1 when it is not there (the quote state moves on) */
+  private tagEnd(chunk: string): number {
+    if (!this.tagQuoted) return chunk.indexOf('>')
+    let q = this.tagQuote
+    for (let j = 0; j < chunk.length; j++) {
+      const cc = chunk.charCodeAt(j)
+      if (q !== 0) {
+        if (cc === q) q = 0
+      } else if (cc === 34 || cc === 39) q = cc
+      else if (cc === 62) return j
+    }
+    this.tagQuote = q
+    return -1
+  }
+
+  /** the tag starting at `lt` does not end in `s`: it is held until it does */
+  private holdTag(s: string, lt: number, quote: number, quoted: boolean) {
+    this.tag = [s.substring(lt)]
+    this.tagLen = s.length - lt
+    this.tagQuote = quote
+    this.tagQuoted = quoted
+    if (this.tagLen > MAX_XML_TAG) throw new Error(`XML tag longer than ${MAX_XML_TAG >> 20} MB`)
+  }
+
+  /**
+   * The comment / processing instruction / declaration / CDATA section opened at `lt` (its opening `open` characters
+   * long) does not end in `s`: what is there of it is passed on, less the characters its end may start with.
+   */
+  private enter(s: string, lt: number, open: number, until: string, cdata: boolean) {
+    const n = s.length
+    const keep = Math.min(n - lt - open, until.length - 1)
+    this.raw?.(s.substring(lt, n - keep))
+    if (cdata && this.skipDepth < 0 && n - keep > lt + open) this.h.text(s.substring(lt + open, n - keep))
+    this.buf = s.substring(n - keep)
+    this.until = until
+    this.cdata = cdata
+  }
+
+  private run(s: string, final: boolean) {
     const n = s.length
     let i = 0
-    const h = this.hint
-    const hq = this.hintQ
-    this.hint = this.hintQ = 0
-    // where to resume looking for the end of the token at `lt` (only the one at the start of the buffer has a hint)
-    const from = (lt: number, min: number) => (lt === 0 ? Math.max(min, h) : min)
-    // the unfinished token starts the buffer: all of it was searched, but the last `keep` characters of a multi-character end
-    const wait = (lt: number, keep = 0) => void (this.hint = Math.max(0, n - lt - keep))
+    if (this.until) {
+      const until = this.until
+      const e = s.indexOf(until)
+      const cdata = this.cdata
+      if (e < 0) {
+        // not yet: on with it, less the characters its end may start with
+        const keep = final ? 0 : Math.min(n, until.length - 1)
+        if (n > keep) {
+          const seg = s.substring(0, n - keep)
+          this.raw?.(seg)
+          if (cdata && this.skipDepth < 0) this.h.text(seg)
+        }
+        this.buf = s.substring(n - keep)
+        return
+      }
+      this.raw?.(s.substring(0, e + until.length))
+      if (cdata && this.skipDepth < 0 && e > 0) this.h.text(s.substring(0, e))
+      this.until = ''
+      this.cdata = false
+      i = e + until.length
+    }
     while (i < n) {
-      const lt = s.indexOf('<', i === 0 && s.charCodeAt(0) !== 60 ? h : i)
+      const lt = s.indexOf('<', i)
       if (lt < 0) {
-        if (final) {
-          const seg = s.substring(i)
+        // Text is passed on as it comes (a run of it is not held until its end: it may be the whole file), less a
+        // character reference that may be cut by the end of the chunk.
+        let cut = n
+        if (!final) {
+          const amp = s.lastIndexOf('&')
+          if (amp >= i && amp >= n - 16 && s.indexOf(';', amp) < 0) cut = amp
+        }
+        if (cut > i) {
+          const seg = s.substring(i, cut)
           this.raw?.(seg)
           this.onText(seg)
-          i = n
-        } else this.hint = n - i
+        }
+        i = cut
         break
       }
       if (lt > i) {
@@ -105,9 +193,10 @@ export class SaxParser {
       if (lt + 1 >= n) break
       const c = s.charCodeAt(lt + 1)
       if (c === 47) {
-        const gt = s.indexOf('>', from(lt, lt + 2))
+        const gt = s.indexOf('>', lt + 2)
         if (gt < 0) {
-          wait(lt)
+          if (!final) this.holdTag(s, lt, 0, false)
+          i = n
           break
         }
         this.raw?.(s.substring(lt, gt + 1))
@@ -116,10 +205,10 @@ export class SaxParser {
         continue
       }
       if (c === 63) {
-        const e = s.indexOf('?>', from(lt, lt + 2))
+        const e = s.indexOf('?>', lt + 2)
         if (e < 0) {
-          wait(lt, 1)
-          break
+          if (!final) this.enter(s, lt, 2, '?>', false)
+          return
         }
         this.raw?.(s.substring(lt, e + 2))
         i = e + 2
@@ -128,38 +217,38 @@ export class SaxParser {
       if (c === 33) {
         if (n - lt < 9 && !final) break
         if (s.startsWith('<!--', lt)) {
-          const e = s.indexOf('-->', from(lt, lt + 4))
+          const e = s.indexOf('-->', lt + 4)
           if (e < 0) {
-            wait(lt, 2)
-            break
+            if (!final) this.enter(s, lt, 4, '-->', false)
+            return
           }
           this.raw?.(s.substring(lt, e + 3))
           i = e + 3
           continue
         }
         if (s.startsWith('<![CDATA[', lt)) {
-          const e = s.indexOf(']]>', from(lt, lt + 9))
+          const e = s.indexOf(']]>', lt + 9)
           if (e < 0) {
-            wait(lt, 2)
-            break
+            if (!final) this.enter(s, lt, 9, ']]>', true)
+            return
           }
           this.raw?.(s.substring(lt, e + 3))
           if (this.skipDepth < 0) this.h.text(s.substring(lt + 9, e))
           i = e + 3
           continue
         }
-        const e = s.indexOf('>', from(lt, lt + 2))
+        const e = s.indexOf('>', lt + 2)
         if (e < 0) {
-          wait(lt)
-          break
+          if (!final) this.enter(s, lt, 2, '>', false)
+          return
         }
         this.raw?.(s.substring(lt, e + 1))
         i = e + 1
         continue
       }
       let gt = -1
-      let q = lt === 0 && h > 1 ? hq : 0
-      for (let j = lt === 0 && h > 1 ? h : lt + 1; j < n; j++) {
+      let q = 0
+      for (let j = lt + 1; j < n; j++) {
         const cc = s.charCodeAt(j)
         if (q !== 0) {
           if (cc === q) q = 0
@@ -170,8 +259,8 @@ export class SaxParser {
         }
       }
       if (gt < 0) {
-        wait(lt)
-        this.hintQ = q
+        if (!final) this.holdTag(s, lt, q, true)
+        i = n
         break
       }
       this.raw?.(s.substring(lt, gt + 1))

@@ -99,6 +99,61 @@ describe('C20 XML reader is linear', () => {
     expect(parseXml(xml).c.length).toBe(20_000)
     expect(chunked(xml, 7).length).toBe(20_000 + 1)
   })
+  test('a run of text, a comment or a CDATA section as long as the file is passed on chunk by chunk, not held', () => {
+    const CHUNK = 1 << 16
+    const feed = (open: string, fill: string, close: string, mb: number) => {
+      const pieces: number[] = []
+      let raw = 0
+      const p = new SaxParser({ open: () => {}, close: () => {}, text: (t) => void pieces.push(t.length) }, (r) => void (raw += r.length))
+      const block = fill.repeat(CHUNK)
+      const t = performance.now()
+      p.write('<a>' + open)
+      for (let k = 0; k < (mb << 20) / CHUNK; k++) p.write(block)
+      p.write(close + '<b/></a>')
+      p.end()
+      return { pieces, raw, ms: performance.now() - t, total: (mb << 20) + 3 + open.length + close.length + 8 }
+    }
+    // 64 MB of each: held whole, every chunk would copy what came before (2 GB and more of copies)
+    const text = feed('', ' ', '', 64)
+    expect(text.pieces.length).toBeGreaterThan(1000)
+    expect(Math.max(...text.pieces)).toBeLessThanOrEqual(CHUNK + 16)
+    expect(text.pieces.reduce((x, y) => x + y, 0)).toBe(64 << 20)
+    expect(text.raw).toBe(text.total)
+    const comment = feed('<!--', 'c', '-->', 64)
+    expect(comment.pieces).toEqual([])
+    expect(comment.raw).toBe(comment.total)
+    const cdata = feed('<![CDATA[', ']', ']]>', 64)
+    expect(cdata.pieces.reduce((x, y) => x + y, 0)).toBe(64 << 20)
+    expect(cdata.raw).toBe(cdata.total)
+    expect(text.ms + comment.ms + cdata.ms).toBeLessThan(5000)
+  })
+
+  test('a character reference cut by the end of a chunk is read whole', () => {
+    for (const size of [1, 2, 3, 4, 5, 7]) {
+      let out = ''
+      const p = new SaxParser({ open: () => {}, close: () => {}, text: (t) => void (out += t) })
+      const xml = '<a>x &amp; y &#x41;&#66; &lt;tag&gt; AT&T &quot;q&quot; end &</a>'
+      for (let i = 0; i < xml.length; i += size) p.write(xml.slice(i, i + size))
+      p.end()
+      expect(out).toBe('x & y AB <tag> AT&T "q" end &')
+    }
+  })
+
+  test('a tag of megabytes is read once; past 16 MB the file is refused', () => {
+    const attrs = (mb: number) => '<a x="' + 'v'.repeat(mb << 20) + '"><b/></a>'
+    const parse = (xml: string) => {
+      const ev: [string, number][] = []
+      const p = new SaxParser({ open: (n, a) => void ev.push([n, (a.x ?? '').length]), close: () => {}, text: () => {} })
+      for (let i = 0; i < xml.length; i += 1 << 16) p.write(xml.slice(i, i + (1 << 16)))
+      p.end()
+      return ev
+    }
+    const t = performance.now()
+    expect(parse(attrs(8))).toEqual([['a', 8 << 20], ['b', 0]])
+    expect(performance.now() - t).toBeLessThan(3000)
+    expect(() => parse(attrs(17))).toThrow(/tag longer than 16 MB/)
+  })
+
   test('a 300 KB docx full of whitespace and comments opens in bounded time', async () => {
     const pad = '<!--' + 'c'.repeat(big) + '-->' + ' '.repeat(big)
     const file = await mkDocx(`<w:p>${pad}<w:r>${pad}<w:t>hi</w:t></w:r></w:p>`)
