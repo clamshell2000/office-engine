@@ -18,7 +18,8 @@ import { materializeShared, restore, setColWidth, setMerge, setRowHeight, shiftS
 import { renameSheetInFormula, translateFormula } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
 import {
-  colName, MAX_COL, MAX_ROWS, parseRef, rowSizesOf, SheetData, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST, T_STR, XlsxWorkbook,
+  colName, DEFAULT_STYLES_PART, MAX_COL, MAX_ROWS, parseRef, rowSizesOf, SheetData, stylesPartOf, T_BOOL, T_DATE, T_EMPTY, T_ERR, T_NUM, T_SST,
+  T_STR, XlsxWorkbook,
 } from './workbook'
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -476,8 +477,7 @@ export class XlsxEditor {
 
   private async styles(): Promise<StyleEditor> {
     if (!this.styleEd) {
-      const rel = relOfType(this.wb.rels, 'styles')
-      this.stylesPath = rel?.target ?? 'xl/styles.xml'
+      this.stylesPath = stylesPartOf(this.wb.pkg, this.wb.rels) ?? DEFAULT_STYLES_PART
       const xml = this.wb.pkg.has(this.stylesPath)
         ? await this.wb.pkg.text(this.stylesPath)
         : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>'
@@ -935,7 +935,22 @@ export class XlsxEditor {
     }
     // after the sheets: a sheet given comments here links its drawing of them
     if (this.wb.comments.dirty) await writeXlsxComments(pkg, this.wb.mainPath, this.wb.comments, this.wb.sheets)
+    await this.linkStyles()
     return pkg.save(XLSX_MIME)
+  }
+
+  /**
+   * A workbook that came without a styles part gets one when it is formatted: the workbook has to name it
+   * (relationship + content type), or nothing that opens the saved file finds its formatting. Also links the part a
+   * version before 0.14.2 left unnamed.
+   */
+  private async linkStyles(): Promise<void> {
+    const pkg = this.wb.pkg
+    if (relOfType(await pkg.rels(this.wb.mainPath), 'styles')) return
+    const path = this.stylesPath ?? DEFAULT_STYLES_PART
+    if (!pkg.has(path)) return
+    await pkg.addRel(this.wb.mainPath, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles', path)
+    await pkg.setContentType(path, 'application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml')
   }
 
   /** Streams the original sheet XML, patching only rows that contain edits. */

@@ -312,6 +312,18 @@ class SstHandler implements SaxHandler {
   }
 }
 
+/** where formatting a workbook that has no styles part puts one */
+export const DEFAULT_STYLES_PART = 'xl/styles.xml'
+
+/**
+ * The workbook's styles part: the one its relationship names. A workbook that came without styles and was formatted
+ * by a version before 0.14.2 holds them in a part no relationship names: it is read as well, or the file opens
+ * without any of its formatting.
+ */
+export function stylesPartOf(pkg: OpcPackage, rels: Rels): string | undefined {
+  return relOfType(rels, 'styles')?.target ?? (pkg.has(DEFAULT_STYLES_PART) ? DEFAULT_STYLES_PART : undefined)
+}
+
 export class XlsxWorkbook {
   sheetsData = new Map<number, SheetData>()
   /** the comments (read in `open`) */
@@ -343,8 +355,8 @@ export class XlsxWorkbook {
     }
     const themeRel = relOfType(rels, 'theme')
     const theme = parseTheme(themeRel ? await pkg.xml(themeRel.target) : undefined)
-    const stylesRel = relOfType(rels, 'styles')
-    const styles = parseSheetStyles(stylesRel ? await pkg.xml(stylesRel.target) : undefined, theme)
+    const stylesPath = stylesPartOf(pkg, rels)
+    const styles = parseSheetStyles(stylesPath ? await pkg.xml(stylesPath) : undefined, theme)
     const pr = kid(root, 'workbookPr')
     const date1904 = pr?.a.date1904 === '1' || pr?.a.date1904 === 'true'
     const wb = new XlsxWorkbook(pkg, mainPath, rels, sheets, styles, date1904, theme)
