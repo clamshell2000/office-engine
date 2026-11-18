@@ -70,6 +70,8 @@ export type CellOut = [number, string, number, number, string?]
 export interface RowOut {
   r: number
   cells: CellOut[]
+  /** the format (style index) of the row itself, when it has one: what its places without a cell show */
+  s?: number
 }
 
 export interface BlockOut {

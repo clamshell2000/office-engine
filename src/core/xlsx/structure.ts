@@ -306,6 +306,42 @@ export function setColWidth(d: SheetData, c0: number, c1: number, px: number) {
   d.dirtyCols = true
 }
 
+/** gives columns c0..c1 the format `style` makes of the one they have (0: none), keeping their widths */
+export function setColStyle(d: SheetData, c0: number, c1: number, style: (st: number) => number) {
+  const out: ColInfo[] = []
+  const covered: [number, number][] = []
+  const withStyle = (ci: ColInfo): ColInfo => {
+    const st = style(Number(ci.x?.style ?? 0) || 0)
+    const { style: _s, ...rest } = ci.x ?? {}
+    const x = st ? { ...rest, style: String(st) } : rest
+    const { x: _x, ...bare } = ci
+    return Object.keys(x).length ? { ...bare, x } : bare
+  }
+  for (const ci of d.colInfo) {
+    if (ci.max < c0 || ci.min > c1) out.push(ci)
+    else {
+      if (ci.min < c0) out.push({ ...ci, max: c0 - 1 })
+      if (ci.max > c1) out.push({ ...ci, min: c1 + 1 })
+      const lo = Math.max(ci.min, c0)
+      const hi = Math.min(ci.max, c1)
+      covered.push([lo, hi])
+      out.push(withStyle({ ...ci, min: lo, max: hi }))
+    }
+  }
+  // the columns without a record: one of the default width
+  covered.sort((x, y) => x[0] - y[0])
+  let from = c0
+  for (const [lo, hi] of [...covered, [c1 + 1, c1 + 1] as [number, number]]) {
+    if (lo > from) {
+      const ci = withStyle({ min: from, max: Math.min(lo - 1, c1), w: d.defaultColW })
+      if (ci.x) out.push(ci)
+    }
+    from = Math.max(from, hi + 1)
+  }
+  d.colInfo = out.sort((x, y) => x.min - y.min)
+  d.dirtyCols = true
+}
+
 export function setRowHeight(d: SheetData, r0: number, r1: number, px: number) {
   for (let r = r0; r <= r1; r++) {
     const cur = d.rowAttrs.get(r)

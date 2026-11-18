@@ -683,10 +683,16 @@ export class XlsxWorkbook {
     if (!d) return { sheet, r0, r1, rows, complete: false }
     await this.ensure(d, r0, r1 - 1)
     const xfs = this.styles.xfs
-    const end = Math.min(r1, Math.max(d.maxRow + 1, d.rows.length))
+    // (rows past the last cell may have a format of their own)
+    const end = d.rowAttrs.size ? r1 : Math.min(r1, Math.max(d.maxRow + 1, d.rows.length))
     for (let r = r0; r < end; r++) {
       const row = d.rows[r]
-      if (!row) continue
+      const x = d.rowAttrs.size ? d.rowAttrs.get(r)?.x : undefined
+      const own = x && (x.customFormat === '1' || x.customFormat === 'true') ? Number(x.s ?? 0) || 0 : undefined
+      if (!row) {
+        if (own) rows.push({ r, cells: [], s: own })
+        continue
+      }
       const cells: CellOut[] = []
       for (let k = 0; k < row.length; k += 4) {
         const c = row[k] as number
@@ -726,7 +732,7 @@ export class XlsxWorkbook {
             cells.push([c, '', s, 0])
         }
       }
-      rows.push({ r, cells })
+      rows.push(own ? { r, cells, s: own } : { r, cells })
     }
     // rows of a page the scan has not passed yet are not known
     const known = d.pages && !d.pages.complete ? Math.min(d.maxRow, d.pages.scanned - 1) : d.maxRow

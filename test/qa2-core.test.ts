@@ -286,3 +286,78 @@ describe('Undo and Redo go through every state again (snapshots share the rows t
     expect(await dump(re)).toBe(final)
   }, 60_000)
 })
+
+describe('P2-042: a format given to whole columns, rows or the sheet', () => {
+  const STYLES = '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>'
+  const big = () => book({ sheets: [{ name: 'S', rows: rows(Array.from({ length: 3000 }, (_, r) => [r, `t${r}`, r * 2])) }], styles: STYLES })
+  const bold = (o: Opened, st: number) => o.info.xlsx.styles[st]?.fontWeight === 700 || ((o.engine as any).xlsx.styles.xfs[st]?.css.fontWeight === 700)
+  const styleOf = async (o: Opened, r: number, c: number) => ((await o.engine.call('xlsx.block', [0, r, r + 1])) as any).rows[0]?.cells.find((x: any) => x[0] === c)?.[2] ?? -1
+
+  test('a whole column: every cell of it, the column itself for the rest, a few bytes in the file', async () => {
+    const o = await openBook(await big())
+    const res: any = await o.engine.call('xlsx.format', [0, { r0: 0, c0: 1, r1: 1_048_575, c1: 1 }, { b: true }])
+    expect(res.layout.colInfo.find((ci: any) => ci.min === 1 && ci.max === 1)?.x?.style).toBeDefined()
+    for (const r of [0, 1500, 2999]) expect(bold(o, await styleOf(o, r, 1))).toBe(true)
+    expect(bold(o, await styleOf(o, 0, 0))).toBe(false)
+    // no cells made down to the last row
+    expect((o.engine as any).xlsx.sheetsData.get(0).maxRow).toBe(2999)
+    // what is typed below takes the column's format
+    await o.set(0, 'B5000', 'new')
+    expect(bold(o, await styleOf(o, 4999, 1))).toBe(true)
+    await o.set(0, 'C5000', 'plain')
+    expect(bold(o, await styleOf(o, 4999, 2))).toBe(false)
+    const saved = await o.save()
+    const xml = await saved.text('xl/worksheets/sheet1.xml')
+    expect(xml).toMatch(/<cols><col min="2" max="2" [^>]*style="\d+"\/><\/cols>/)
+    expect(xml).toMatch(/<c r="B3000" s="\d+" t="inlineStr">/)
+    // (the rows the sheet had, and the one typed into: none made to carry the format)
+    expect((xml.match(/<row /g) ?? []).length).toBe(3001)
+    const re = await openBook(saved.blob)
+    expect(bold(re, await styleOf(re, 2999, 1))).toBe(true)
+    await re.set(0, 'B6000', 'x')
+    expect(bold(re, await styleOf(re, 5999, 1))).toBe(true)
+    // undone in one step: the cells and the column
+    await o.engine.call('xlsx.undo', [])
+    await o.engine.call('xlsx.undo', [])
+    await o.engine.call('xlsx.undo', [])
+    expect(bold(o, await styleOf(o, 1500, 1))).toBe(false)
+    expect((await (await o.save()).text('xl/worksheets/sheet1.xml'))).not.toContain('<cols>')
+  })
+
+  test('the whole sheet, then a row over it, then some columns: each place shows the format given last', async () => {
+    const o = await openBook(await big())
+    const all = { r0: 0, c0: 0, r1: 1_048_575, c1: 16_383 }
+    const t0 = performance.now()
+    await o.engine.call('xlsx.format', [0, all, { b: true }])
+    expect(performance.now() - t0).toBeLessThan(20_000)
+    const d = (o.engine as any).xlsx.sheetsData.get(0)
+    expect(d.maxCol).toBe(2)
+    expect(bold(o, await styleOf(o, 2999, 2))).toBe(true)
+    await o.set(0, 'XFD9', 'far')
+    expect(bold(o, await styleOf(o, 8, 16_383))).toBe(true)
+    // a row: its own format, over the sheet's
+    await o.engine.call('xlsx.format', [0, { r0: 4, c0: 0, r1: 4, c1: 16_383 }, { b: false, i: true }])
+    const row5: any = ((await o.engine.call('xlsx.block', [0, 4, 5])) as any).rows[0]
+    expect(row5.s).toBeGreaterThan(0)
+    const css = (st: number) => (o.engine as any).xlsx.styles.xfs[st].css
+    expect([css(row5.s).fontWeight, css(row5.s).fontStyle]).toEqual([undefined, 'italic'])
+    await o.set(0, 'K5', 'in the row')
+    expect(css(await styleOf(o, 4, 10)).fontStyle).toBe('italic')
+    const saved = await o.save()
+    const xml = await saved.text('xl/worksheets/sheet1.xml')
+    expect(xml).toMatch(/<col min="1" max="16384" [^>]*style="\d+"\/>/)
+    expect(xml).toMatch(/<row r="5"[^>]* s="\d+" customFormat="1"/)
+    const re = await openBook(saved.blob)
+    expect(css(await styleOf(re, 4, 0)).fontStyle).toBe('italic')
+    expect(((await re.engine.call('xlsx.block', [0, 4, 5])) as any).rows[0].s).toBeGreaterThan(0)
+  })
+
+  test('a range too large to format cell by cell says so; the cells of a large one are kept by number, not one by one', async () => {
+    const o = await openBook(await big())
+    await expect(o.engine.call('xlsx.format', [0, { r0: 0, c0: 0, r1: 900_000, c1: 9 }, { b: true }])).rejects.toThrow(/whole columns or rows/)
+    await o.engine.call('xlsx.format', [0, { r0: 0, c0: 0, r1: 2999, c1: 2 }, { i: true }])
+    const ch = (o.engine as any).xlsxEd.undoStack.at(-1)
+    expect(ch.cells.length).toBe(0)
+    expect(ch.restyle.keys.length).toBe(9000)
+  })
+})

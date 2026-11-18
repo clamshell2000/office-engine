@@ -14,7 +14,7 @@ import { parseXml } from '../xml'
 import { BUILTIN_FORMATS, isDateFormat } from './numfmt'
 import { parseSheetStyles } from './styles'
 import type { BookOp, BorderKind, CellInput, ClipCell, ColInfo, FindOptions, FmtPatch, Merge, Range, RowAttrs, SheetOp, SheetProgress, XlsxClip, XlsxEditResult } from './types'
-import { expandShared, overflows, restore, setColWidth, setFormula, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
+import { expandShared, overflows, restore, setColStyle, setColWidth, setFormula, setMerge, setRowHeight, shiftSheet, snapshot, type Snapshot } from './structure'
 import { dropSheetInFormula, moveRefsInFormula, parseFormula, renameSheetInFormula, translateFormula, withFunctionPrefixes, type Ast, type MoveOp, type RefAddr } from './formula'
 import { loadDelimited, type DelimitedImport } from './import'
 import { tsvCell } from './clip'
@@ -64,10 +64,15 @@ export interface Change {
    * move), by cell.
    */
   sort?: { order: number[]; before: [number, string][]; after: [number, string][] }
+  /** the format (style index) of cells before and after, by cell key; -1: no cell (the change made one to hold a format) */
+  restyle?: { keys: Float64Array; before: Int32Array; after: Int32Array }
 }
 
 /** the functions that give a date: a cell without a format shows their result as one */
 const DATE_FUNCTIONS = new Set(['TODAY', 'DATE', 'DATEVALUE', 'EDATE', 'EOMONTH', 'WORKDAY'])
+
+/** cells a format of whole columns / rows may make where they cross rows / columns that have a format of their own */
+const MAX_CELLS_MADE = 200_000
 
 /** cells an edit may touch at once (each is kept for Undo) */
 const MAX_CELLS_AT_ONCE = 2_000_000
@@ -680,7 +685,8 @@ export class XlsxEditor {
     for (const { r, c, input } of inputs) {
       const key = r * MAX_COL + c
       const prev = getEntry(d, r, c)
-      const st = prev?.[2] ?? 0
+      // (a cell typed into an empty place takes the format of its row, else of its column)
+      const st = prev?.[2] ?? this.lockStyleAt(d, r, c)
       const { e, f, want: typed } = parseInput(input, st, { fmt: xfs[st]?.numFmt ?? '', date1904: this.wb.date1904 })
       // a formula typed into a cell without a format shows as what it computes: a date, or as the cell it is
       const want = typed ?? (e && f && !/[^\s]/.test((xfs[st]?.numFmt ?? '').replace(/^general$/i, '')) ? this.formulaFormat(sheet, f) : undefined)
@@ -802,31 +808,139 @@ export class XlsxEditor {
     return this.styleEd
   }
 
+  /**
+   * Formats the cells of `range`. Whole columns (or the whole sheet) and whole rows take the format as their own,
+   * as in Excel: the cells they have get it one by one, the rest through the column's / row's style, which a cell
+   * typed there later takes. The format of every cell before and after is kept by cell (`Change.restyle`).
+   */
   async format(sheet: number, range: Range, patch: FmtPatch): Promise<XlsxEditResult> {
     await this.ready()
     const d = this.sheet(sheet)
+    this.denySheet(d, 'formatCells', 'formatting cells')
     const ed = await this.styles()
-    const r1 = Math.min(range.r1, range.r0 + 200_000)
-    await this.wb.ensure(d, range.r0, r1)
+    const wholeCols = range.r0 === 0 && range.r1 >= MAX_ROWS - 1
+    const wholeRows = !wholeCols && range.c0 === 0 && range.c1 >= MAX_COL - 1
+    const R = wholeCols || wholeRows ? this.used(d, range) : range
+    await this.wb.ensure(d, R.r0, R.r1)
     const before = this.wb.styles.xfs.length
-    const changes: CellChange[] = []
-    let budget = 300_000
-    for (let r = range.r0; r <= r1 && budget > 0; r++) {
-      for (let c = range.c0; c <= range.c1 && budget > 0; c++, budget--) {
-        const key = r * MAX_COL + c
-        const prev = getEntry(d, r, c)
-        const cellPatch = patch.border ? { ...patch, sides: borderSides(patch.border, range, r, c) } : patch
-        if (patch.border && !Object.keys((cellPatch as { sides: object }).sides).length) continue
-        const s = patch.clear ? 0 : patch.xf !== undefined ? patch.xf : ed.derive(prev?.[2] ?? 0, cellPatch)
-        const next: Entry = prev ? [prev[0], prev[1], s] : [T_EMPTY, '', s]
-        const f = d.formulas.get(key)
-        changes.push({ key, prev, prevF: f, next, nextF: f })
+    const styled = (st: number, r: number, c: number): number => {
+      if (patch.clear) return 0
+      if (patch.xf !== undefined) return patch.xf
+      if (!patch.border) return ed.derive(st, patch)
+      const sides = borderSides(patch.border, range, r, c)
+      return Object.keys(sides).length ? ed.derive(st, { ...patch, sides } as FmtPatch) : st
+    }
+    // the format of a column / row itself: no borders but those every cell gets
+    const own = (st: number): number => {
+      if (patch.clear) return 0
+      if (patch.xf !== undefined) return patch.xf
+      if (!patch.border) return ed.derive(st, patch)
+      if (patch.border !== 'all' && patch.border !== 'none') return st
+      const on = patch.border === 'all'
+      return ed.derive(st, { ...patch, sides: { top: on, bottom: on, left: on, right: on } } as FmtPatch)
+    }
+    const keys: number[] = []
+    const was: number[] = []
+    const now: number[] = []
+    const put = (r: number, c: number, st: number, exists: boolean) => {
+      const s = styled(st, r, c)
+      // (a place without a cell shows the format of its row / column: no cell is made to say the same)
+      if (s === st) return
+      keys.push(r * MAX_COL + c)
+      was.push(exists ? st : -1)
+      now.push(s)
+    }
+    const lay = wholeCols || wholeRows ? layoutState(d) : undefined
+    if (!wholeCols && !wholeRows) {
+      const count = (R.r1 - R.r0 + 1) * (R.c1 - R.c0 + 1)
+      if (count > MAX_CELLS_AT_ONCE) throw new Error(`Too many cells to format at once (${count.toLocaleString()}): select whole columns or rows instead`)
+      for (let r = R.r0; r <= R.r1; r++) {
+        const row = d.rows[r]
+        let k = row ? colAt(row, R.c0) : 0
+        for (let c = R.c0; c <= R.c1; c++) {
+          if (row && k < row.length && row[k] === c) {
+            put(r, c, row[k + 3] as number, true)
+            k += 4
+          } else put(r, c, this.lockStyleAt(d, r, c), false)
+        }
+      }
+    } else {
+      // the cells there are
+      for (let r = R.r0; r <= R.r1; r++) {
+        const row = d.rows[r]
+        if (!row) continue
+        for (let k = colAt(row, R.c0); k < row.length && (row[k] as number) <= R.c1; k += 4) put(r, row[k] as number, row[k + 3] as number, true)
+      }
+      const rowStyle = (a: RowAttrs | undefined) => (a?.x && (a.x.customFormat === '1' || a.x.customFormat === 'true') ? Number(a.x.s ?? 0) || 0 : undefined)
+      if (wholeCols) {
+        const sheetWide = range.c0 === 0 && range.c1 >= MAX_COL - 1
+        // where a row has a format of its own, that one shows in its empty cells: the whole sheet changes it too,
+        // some columns get a cell there (as Excel writes them)
+        let made = 0
+        for (const [r, a] of d.rowAttrs) {
+          const st = rowStyle(a)
+          if (st === undefined) continue
+          if (sheetWide) d.rowAttrs.set(r, { ...a, x: { ...a.x, s: String(own(st)), customFormat: '1' } })
+          else for (let c = range.c0; c <= range.c1 && made < MAX_CELLS_MADE; c++) if (!getEntry(d, r, c)) (put(r, c, st, false), made++)
+          d.dirtyRows.add(r)
+        }
+        setColStyle(d, range.c0, Math.min(range.c1, MAX_COL - 1), own)
+      } else {
+        const last = Math.min(range.r1, MAX_ROWS - 1)
+        if (last - range.r0 + 1 > MAX_CELLS_MADE) throw new Error('Too many rows to format at once: select the whole sheet instead')
+        // the columns with a format of their own keep it under the row's: a cell where they cross (not for a format of the whole sheet's width)
+        const cols = d.colInfo.filter((ci) => ci.x?.style && ci.max - ci.min < 1024)
+        let made = 0
+        for (let r = range.r0; r <= last; r++) {
+          const a = d.rowAttrs.get(r)
+          const st = rowStyle(a)
+          for (const ci of cols) for (let c = ci.min; c <= ci.max && made < MAX_CELLS_MADE; c++) if (st === undefined && !getEntry(d, r, c)) (put(r, c, Number(ci.x!.style) || 0, false), made++)
+          d.rowAttrs.set(r, { ...(a ?? {}), x: { ...(a?.x ?? {}), s: String(own(st ?? 0)), customFormat: '1' } })
+          d.dirtyRows.add(r)
+        }
       }
     }
-    this.apply(d, changes, 'next')
-    const res = this.record(sheet, changes, range)
+    if (keys.length > MAX_CELLS_AT_ONCE * 2) throw new Error(`Too many cells to format at once (${keys.length.toLocaleString()})`)
+    const restyle = { keys: Float64Array.from(keys), before: Int32Array.from(was), after: Int32Array.from(now) }
+    this.restyle(d, restyle, 'next')
+    this.lastRecalc = []
+    const res = this.record(sheet, [], range, lay && { before: lay, after: layoutState(d) })
+    this.undoStack[this.undoStack.length - 1].restyle = restyle
     res.styles = this.restyled(ed, before)
     return res
+  }
+
+  /** gives the cells of a format change the format they had before it, or have after (a cell the change made goes with it) */
+  private restyle(d: SheetData, x: NonNullable<Change['restyle']>, which: 'prev' | 'next') {
+    const to = which === 'next' ? x.after : x.before
+    // many cells: their rows are written whole, where a set of every cell would take more room than the cells
+    const bulk = x.keys.length > 50_000
+    for (let i = 0; i < x.keys.length; i++) {
+      const key = x.keys[i]
+      const r = Math.floor(key / MAX_COL)
+      const c = key % MAX_COL
+      if (d.pages && !d.pages.has(r)) throw new Error('Row not in memory')
+      d.pages?.pin(r)
+      let row = ownRow(d, r)
+      let k = row ? colAt(row, c) : 0
+      const exists = !!row && k < row.length && row[k] === c
+      if (to[i] < 0) {
+        // (the cell was made to hold the format: it goes, unless something was typed into it since)
+        if (exists && row![k + 1] === T_EMPTY) {
+          row!.splice(k, 4)
+          if (!row!.length) d.rows[r] = undefined
+        } else if (exists) row![k + 3] = 0
+      } else if (exists) row![k + 3] = to[i]
+      else {
+        if (!row) d.rows[r] = row = []
+        k = colAt(row, c)
+        row.splice(k, 0, c, T_EMPTY, '', to[i])
+        if (r > d.maxRow) d.maxRow = r
+        if (c > d.maxCol) d.maxCol = c
+      }
+      if (bulk) d.rewrite.add(r)
+      else d.edited.add(key)
+    }
   }
 
   private step(ch: Change, which: 'prev' | 'next'): XlsxEditResult {
@@ -843,6 +957,7 @@ export class XlsxEditor {
       if (which === 'next') this.moveRows(d, ch.range, ch.sort.order, ch.sort.before, ch.sort.after)
       else this.moveRows(d, ch.range, inverse(ch.sort.order), ch.sort.after, ch.sort.before)
     }
+    if (ch.restyle) this.restyle(d, ch.restyle, which)
     this.apply(d, ch.cells, which)
     if (ch.lay) applyLayout(d, which === 'prev' ? ch.lay.before : ch.lay.after)
     const recalc = ch.full || ch.others?.length || ch.sort ? this.recalcAll() : this.lastRecalc
@@ -895,6 +1010,12 @@ export class XlsxEditor {
       lay: ch.lay ? { before: layoutState(d), after: which === 'prev' ? ch.lay.before : ch.lay.after } : undefined,
       full: ch.full ? { before: snapshot(d), after: which === 'prev' ? ch.full.before : ch.full.after } : undefined,
       others: ch.others?.map((o) => ({ ...o, prev: this.wb.sheetsData.get(o.sheet)?.formulas.get(o.key) ?? '', next: which === 'prev' ? o.prev : o.next })),
+      // (the cells as they are formatted now, given the format of then)
+      restyle: ch.restyle && {
+        keys: ch.restyle.keys,
+        before: Int32Array.from(ch.restyle.keys, (key) => getEntry(d, Math.floor(key / MAX_COL), key % MAX_COL)?.[2] ?? -1),
+        after: which === 'prev' ? ch.restyle.before : ch.restyle.after,
+      },
       // (the rows as they are now, put back in the order they had)
       sort: ch.sort && (which === 'prev' ? { order: inverse(ch.sort.order), before: ch.sort.after, after: ch.sort.before } : ch.sort),
       cm: ch.cm
@@ -924,7 +1045,7 @@ export class XlsxEditor {
 
   /** style index of a cell (0 when empty) */
   styleAt(sheet: number, r: number, c: number): number {
-    return getEntry(this.sheet(sheet), r, c)?.[2] ?? 0
+    return this.lockStyleAt(this.sheet(sheet), r, c)
   }
 
   /** current layout of a sheet (after structural edits) */
@@ -2140,6 +2261,11 @@ class RowPatcher {
       setAttr(row, 'ht', a?.ht !== undefined ? String(a.ht) : undefined)
       setAttr(row, 'customHeight', a?.ht !== undefined ? '1' : undefined)
       setAttr(row, 'hidden', a?.hidden ? '1' : undefined)
+      // (the format of the row itself, when it has one)
+      if (a?.x?.s !== undefined) {
+        setAttr(row, 's', a.x.s)
+        setAttr(row, 'customFormat', a.x.customFormat)
+      }
     }
     if (this.d.rewrite.has(r)) {
       // its cells moved as wholes: every cell is written from the model, what else the row holds stays
