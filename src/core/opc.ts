@@ -159,7 +159,8 @@ export class OpcPackage {
     let i = b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0
     // UTF-16 (a byte order mark) is read by the parts' reader
     if ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff)) return
-    while (i < b.length && (b[i] === 0x20 || b[i] === 0x09 || b[i] === 0x0a || b[i] === 0x0d)) i++
+    // (UTF-16 without a mark has a zero byte beside every character)
+    while (i < b.length && (b[i] === 0x20 || b[i] === 0x09 || b[i] === 0x0a || b[i] === 0x0d || b[i] === 0)) i++
     if (b[i] !== 0x3c) throw new Error(`The file is damaged: its main part “${path}” is ${b.length ? 'not XML' : 'empty'}`)
   }
 
