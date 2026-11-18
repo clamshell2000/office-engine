@@ -225,6 +225,9 @@ const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').re
 function mdInline(s: string): string {
   const code: string[] = []
   s = s.replace(/`([^`]+)`/g, (_, c: string) => `\u0000${code.push(c) - 1}\u0000`)
+  // a backslash before punctuation: the character itself, never markup (an entity of the escaping stays whole)
+  const lit: string[] = []
+  s = s.replace(/\\(&(?:amp|lt|gt|quot);|[!-/:-@[-`{-~])/g, (_, c: string) => `\u0001${lit.push(c) - 1}\u0001`)
   s = s
     .replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_, t: string, u: string) => (safeHref(u) ? `<a href="${u}">${t}</a>` : t))
@@ -232,7 +235,7 @@ function mdInline(s: string): string {
     .replace(/(^|[^*\w])\*(?=\S)(.+?)(?<=\S)\*(?!\*)/g, '$1<i>$2</i>')
     .replace(/(^|[^_\w])_(?=\S)(.+?)(?<=\S)_(?!\w)/g, '$1<i>$2</i>')
     .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '<s>$1</s>')
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => `<code>${code[Number(i)]}</code>`)
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i: string) => `<code>${code[Number(i)]}</code>`).replace(/\u0001(\d+)\u0001/g, (_, i: string) => lit[Number(i)])
 }
 
 /** Small CommonMark subset → HTML: headings, paragraphs, lists, quotes, code blocks, rules, tables. */

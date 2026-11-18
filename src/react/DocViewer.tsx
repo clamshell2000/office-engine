@@ -230,7 +230,14 @@ export function DocViewer(props: DocViewerProps) {
     const stale = rebuilds && lastEdit.current === 'doc'
     if (code !== null && !stale) return
     let live = true
-    const built = stale && fileOps.current ? fileOps.current.text(saveFormat === 'html' ? 'html' : 'md').catch(() => null) : Promise.resolve(null)
+    const ops = fileOps.current
+    // the source the document was built from: what was not edited is kept from it
+    const built =
+      stale && ops
+        ? Promise.resolve(code ?? (client.call('plain.source') as Promise<string | null>))
+            .then((base) => ops.text(saveFormat === 'html' ? 'html' : 'md', base ?? undefined))
+            .catch(() => null)
+        : Promise.resolve(null)
     built
       .then(async (t) => (typeof t === 'string' ? t : ((await client.call('plain.source')) as string | null)))
       .then(
@@ -331,7 +338,7 @@ export function DocViewer(props: DocViewerProps) {
   const sourceText = useCallback(async (): Promise<string> => {
     if (!client) return ''
     if (rebuilds && lastEdit.current === 'doc' && fileOps.current) {
-      const text = (await fileOps.current.text(saveFormat === 'html' ? 'html' : 'md')) as string
+      const text = (await fileOps.current.text(saveFormat === 'html' ? 'html' : 'md', code ?? ((await client.call('plain.source')) as string | null) ?? undefined)) as string
       lastEdit.current = null
       setCode(text)
       return text

@@ -292,6 +292,24 @@ describe('New / Open', () => {
     expect((await docxParas((await v.save()).bytes)).map(paraText)).toEqual(['line one', 'line two'])
   })
 
+  test('a Markdown file edited as a document keeps its tables, nested lists, code, quotes and front matter when saved', async () => {
+    const MD = '---\ntitle: T\n---\n\n# Notes\n\nSome words here.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n- one\n  - nested\n\n```ts\nconst x = 1\n```\n\n> quoted\n\n![logo](https://example.com/l.png)\n\nEnd.\n'
+    const v = await viewer({ src: 'samples/sample.xlsx', onSave: true, editable: true })
+    await v.chooseFile(() => v.menu('Open…'), file('notes.md', MD))
+    await v.page.locator('.de-dialog').waitFor().catch(() => {})
+    if (await v.page.locator('.de-dialog').count()) await v.page.locator('.de-dialog button', { hasText: 'Continue' }).click()
+    await v.page.locator('.de-page-inner').first().waitFor()
+    await v.page.waitForTimeout(500)
+    await v.edit()
+    await v.selectText('Some words here', 'end')
+    await v.page.keyboard.type('!')
+    await v.page.waitForTimeout(300)
+    const n = (await v.events('save')).length
+    await v.menu('Save')
+    const saved = await v.waitEvent('save', n + 1)
+    expect(Buffer.from(saved.b64 as string, 'base64').toString('utf8')).toBe(MD.replace('Some words here.', 'Some words here!.'))
+  })
+
   test('Open: Office file as is; unsupported file reports an error', async () => {
     const v = await viewer({ src: 'samples/sample.docx' })
     await v.chooseFile(() => v.menu('Open…'), `${SAMPLES}/sample.pptx`)

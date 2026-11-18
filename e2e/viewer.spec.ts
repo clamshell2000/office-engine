@@ -265,7 +265,7 @@ describe('viewing', () => {
     }
   })
 
-  test('a Markdown file edited as a document is saved as Markdown, its source built again', async () => {
+  test('a Markdown file edited as a document is saved as Markdown, the edited part built again', async () => {
     const v = await viewer({ src: 'samples/sample.md', onSave: true })
     const { page } = v
     await page.locator('.de-page-inner').first().waitFor()
@@ -277,7 +277,9 @@ describe('viewing', () => {
     const md = saved.bytes.toString('utf8')
     expect(md).toStartWith('# Field notes (edited)\n')
     expect(md).toContain('- Survey the northern sites')
-    expect(md).toContain('![Mermaid diagram](data:image/svg+xml;base64,')
+    // what was not edited stays as the file has it: the table and the diagram's source
+    expect(md).toContain('| North | 1280     | done   |')
+    expect(md).toContain('```mermaid\nflowchart LR')
     // the source pane shows the Markdown built from the document
     await page.getByTestId('de-code-toggle').click()
     const input = page.getByTestId('de-source-input')
@@ -306,9 +308,11 @@ describe('viewing', () => {
     const html = saved.bytes.toString('utf8')
     expect(html).toStartWith('<!doctype html>')
     expect(html).toContain('<h1>Sample page 2</h1>')
-    expect(html).toContain('<li>Edit the document, or its markup under <strong>Code</strong></li>')
+    // the rest of the page as the file has it
+    expect(html).toContain('<li>Edit the document, or its markup under <b>Code</b></li>')
     expect(html).toContain('<a href="https://p10node.github.io/office-engine/">links</a>')
-    expect(html).toContain('<img src="data:image/svg+xml;base64,')
+    expect(html).toContain('<pre class="mermaid">')
+    expect(html).toContain('<title>Sample page</title>')
     expect(v.errors).toEqual([])
   })
 

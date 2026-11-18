@@ -196,8 +196,8 @@ export function plainFormat(name: string | undefined, type: string | undefined, 
   return mime ?? sniff(new TextDecoder().decode(head), whole)
 }
 
-const fromHtml = (html: string): ImportPara[] =>
-  htmlToParas(html).map((p) => ({
+const fromHtml = (html: string, dom = true): ImportPara[] =>
+  htmlToParas(html, dom).map((p) => ({
     heading: p.heading,
     list: p.list,
     runs: p.runs.flatMap((r) => (r.t === 'text' ? [{ text: r.text, set: r.d, href: r.href }] : [])),
@@ -217,12 +217,12 @@ function diagramParas(lang: DiagramLang, src: string): ImportPara[] {
 }
 
 /** Markdown: the text, and code blocks in a diagram language (```mermaid, ```plantuml, ```dot) as drawings */
-function markdownParas(md: string): ImportPara[] {
+export function markdownParas(md: string, dom = true): ImportPara[] {
   const lines = md.replace(/^﻿/, '').split(/\r\n|\r|\n/)
   const out: ImportPara[] = []
   let text: string[] = []
   const flush = () => {
-    if (text.length) out.push(...fromHtml(markdownToHtml(text.join('\n'))))
+    if (text.length) out.push(...fromHtml(markdownToHtml(text.join('\n')), dom))
     text = []
   }
   for (let i = 0; i < lines.length; i++) {
@@ -249,17 +249,17 @@ function markdownParas(md: string): ImportPara[] {
 const HTML_DIAGRAM = /<(pre|div)\b[^>]*\bclass\s*=\s*["'][^"']*\b(mermaid|plantuml|graphviz)\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>|<pre\b[^>]*>\s*<code\b[^>]*\bclass\s*=\s*["'][^"']*\blang(?:uage)?-([\w-]+)[^"']*["'][^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi
 
 /** HTML: the page's text, its diagram blocks as drawings */
-function htmlParas(html: string): ImportPara[] {
+export function htmlParas(html: string, dom = true): ImportPara[] {
   const out: ImportPara[] = []
   let at = 0
   for (const m of html.matchAll(HTML_DIAGRAM)) {
     const lang = FENCE_LANG[(m[2] ?? m[4]).toLowerCase()]
     if (!lang) continue
-    out.push(...fromHtml(html.slice(at, m.index)))
+    out.push(...fromHtml(html.slice(at, m.index), dom))
     out.push(...diagramParas(lang, decodeEntities((m[3] ?? m[5]).replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ''))))
     at = m.index! + m[0].length
   }
-  out.push(...fromHtml(html.slice(at)))
+  out.push(...fromHtml(html.slice(at), dom))
   return out
 }
 

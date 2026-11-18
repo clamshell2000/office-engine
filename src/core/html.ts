@@ -141,9 +141,9 @@ function toRun(text: string, c: Ctx): Inline {
   return { t: 'text', text, s, d: Object.keys(d).length ? d : undefined, href } as Inline
 }
 
-/** Converts HTML (clipboard from Word, Google Docs, web pages; .html files) into paragraphs of formatted runs. */
-export function htmlToParas(html: string): PastedPara[] {
-  const body: HNode = typeof DOMParser !== 'undefined' ? new DOMParser().parseFromString(html, 'text/html').body : parseHtml(html)
+/** Converts HTML (clipboard from Word, Google Docs, web pages; .html files) into paragraphs of formatted runs (`dom`: false reads it with the light parser also where DOMParser exists, as the worker does). */
+export function htmlToParas(html: string, dom = true): PastedPara[] {
+  const body: HNode = dom && typeof DOMParser !== 'undefined' ? new DOMParser().parseFromString(html, 'text/html').body : parseHtml(html)
   const out: PastedPara[] = []
   let cur: PastedPara | null = null
   const para = (props: Partial<PastedPara> = {}) => {

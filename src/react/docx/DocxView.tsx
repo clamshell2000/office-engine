@@ -20,7 +20,8 @@ import { DocxToolbar, styleChoices, type ImageActions } from './DocxToolbar'
 import { FindBar, type Match } from './FindBar'
 import { HeaderFooterDialog } from './HeaderFooterDialog'
 import { PageSetupDialog } from './PageSetupDialog'
-import { docxToHtml, docxToMarkdown, docxToText, pictureData } from '../file/text'
+import { mergeSource } from '../../core/plainmerge'
+import { docxBodyHtml, docxToHtml, docxToMarkdown, docxToText, pictureData } from '../file/text'
 import { BlockView, contextual, type RenderCtx } from './render'
 import { paginate, type PageSlice } from './paginate'
 
@@ -442,10 +443,13 @@ export function DocxView({ client, onStatus, initialZoom = 'fit' }: DocxViewProp
         )),
       }
     },
-    text: async (format) => {
+    text: async (format, base) => {
       if (!done) throw new Error('The document is still loading — try again in a moment')
       if (format === 'txt') return docxToText(st.blocks)
       const images = await pictureData(st.blocks, (t) => client.call('part', t) as Promise<Blob>)
+      // a Markdown / HTML file edited here: what was not edited stays as the file has it
+      const kept = base === undefined || (format !== 'html' && format !== 'md') ? null : mergeSource(base, format === 'html' ? 'html' : 'markdown', st.blocks, (bs) => (format === 'html' ? docxBodyHtml(bs, images) : docxToMarkdown(bs, images)))
+      if (kept !== null) return kept
       return format === 'html' ? docxToHtml(st.blocks, { title: (client.name ?? '').replace(/\.[^.]+$/, ''), images }) : docxToMarkdown(st.blocks, images)
     },
     stats: () => {
