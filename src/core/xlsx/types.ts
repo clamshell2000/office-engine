@@ -167,6 +167,8 @@ export type BookOp =
   | { op: 'rename'; index: number; name: string }
   | { op: 'delete'; index: number }
   | { op: 'move'; from: number; to: number }
+  /** a copy of the sheet (cells, formats, widths, merges) after it, called "Name (2)" */
+  | { op: 'duplicate'; index: number }
 
 export interface FindOptions {
   matchCase?: boolean
