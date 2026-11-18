@@ -3,7 +3,7 @@ import { OpcPackage, relOfType, type Rels } from '../opc'
 import type { RNode } from '../raw'
 import { parseTheme, type Theme } from '../theme'
 import { emuToPt } from '../units'
-import { desc, descAll, kid, kids, num, parseXml, parseXmlStream, path, TreeBuilder, type SaxHandler, type XEl } from '../xml'
+import { desc, descAll, kid, kids, num, DOCX_UNDERSTOOD, parseXml, parseXmlStream, path, TreeBuilder, type SaxHandler, type XEl } from '../xml'
 import { Numbering } from './numbering'
 import { readDocxComments, type DocxComments } from './comments'
 import {
@@ -107,20 +107,82 @@ export function pageSetup(sectPr: XEl | undefined): PageSetup {
 }
 
 // runs inside w:del / w:moveFrom count: deleted text is shown (tracked changes) and written back
-const RUN_STOP = new Set(['p', 'oMath', 'oMathPara', 'pPr', 'rPr', 'r'])
+const RUN_STOP = new Set(['p', 'oMath', 'oMathPara', 'pPr', 'rPr', 'r', 'fldSimple'])
+/** inline elements that stand in the run order like a run: kept as a whole, copied verbatim on write-back */
+const RUN_LIKE = new Set(['r', 'oMath', 'oMathPara', 'fldSimple'])
 
 /** Runs of a paragraph in preorder (the ordinal is the run's identity for write-back). */
 export function collectRuns(p: XEl): Map<XEl, number> {
   const m = new Map<XEl, number>()
   const rec = (n: XEl) => {
     for (const c of n.c) {
-      if (c.n === 'r') m.set(c, m.size)
+      if (RUN_LIKE.has(c.n)) m.set(c, m.size)
       if (!RUN_STOP.has(c.n)) rec(c)
     }
   }
   rec(p)
   return m
 }
+
+/** the text of an element made of runs (a simple field, ruby), tabs and breaks as the converter reads them */
+function textOfRuns(e: XEl): string {
+  let s = ''
+  for (const c of e.c) {
+    switch (c.n) {
+      case 't': case 'delText': s += c.t; break
+      case 'tab': case 'ptab': s += '\t'; break
+      case 'br': if (c.a.type !== 'page') s += '\n'; break
+      case 'cr': s += '\n'; break
+      case 'noBreakHyphen': s += '\u2011'; break
+      case 'softHyphen': s += '\u00AD'; break
+      case 'rPr': case 'rubyPr': case 'rt': break
+      default: s += textOfRuns(c)
+    }
+  }
+  return s
+}
+
+/**
+ * Runs lying inside a PAGE / NUMPAGES complex field (begin … end): the converter models those as one field, every other
+ * field run is kept as it is. A field left open at the end of the list is not one of them.
+ */
+function pageFieldRuns(runs: Iterable<XEl>): Set<XEl> {
+  const out = new Set<XEl>()
+  const open: { instr: string; runs: XEl[]; phase: 'instr' | 'result' }[] = []
+  for (const r of runs) {
+    if (r.n !== 'r') continue
+    for (const f of open) f.runs.push(r)
+    for (const c of r.c) {
+      if (c.n === 'fldChar') {
+        if (c.a.fldCharType === 'begin') open.push({ instr: '', runs: [r], phase: 'instr' })
+        else if (c.a.fldCharType === 'separate' && open.length) open[open.length - 1].phase = 'result'
+        else if (c.a.fldCharType === 'end') {
+          const f = open.pop()
+          if (f && fieldKind(f.instr)) for (const x of f.runs) out.add(x)
+        }
+      } else if (c.n === 'instrText' && open.length && open[open.length - 1].phase === 'instr') open[open.length - 1].instr += c.t
+    }
+  }
+  return out
+}
+
+const RPR_READ = new Set(['b', 'bCs', 'i', 'iCs', 'strike', 'dstrike', 'caps', 'smallCaps', 'vanish', 'u', 'color', 'sz', 'szCs', 'rFonts', 'highlight', 'shd', 'vertAlign', 'spacing'])
+
+/** a signature of the run properties the converter does not read into a style (language, character style, direction…) */
+function rprExtra(rPr: XEl | undefined): string | undefined {
+  let sig: string | undefined
+  for (const c of rPr?.c ?? []) if (!RPR_READ.has(c.n)) (sig ??= ''), (sig += c.n + JSON.stringify(c.a) + ';')
+  return sig
+}
+
+const pick = (o: { src?: SrcRef }, _k: 'src'): { src?: SrcRef } => (o.src ? { src: o.src } : {})
+
+/** run children the converter reads (or that carry nothing): any other child makes the run one to keep as it is */
+const RUN_KNOWN = new Set([
+  'rPr', 'fldChar', 'instrText', 't', 'delText', 'tab', 'ptab', 'br', 'cr', 'noBreakHyphen', 'softHyphen', 'sym', 'drawing', 'commentReference',
+  'pict', 'object', 'footnoteReference', 'endnoteReference', 'lastRenderedPageBreak', 'annotationRef', 'footnoteRef', 'endnoteRef', 'separator',
+  'continuationSeparator', 'pgNum', 'dayShort', 'dayLong', 'monthShort', 'monthLong', 'yearShort', 'yearLong', 'contentPart', 'ruby',
+])
 
 /** Paragraphs of a body item (root included) in preorder. */
 export function collectParas(roots: XEl[], into = new Map<XEl, number>()): Map<XEl, number> {
@@ -152,6 +214,10 @@ export class Converter {
   private boxDepth = 0
   private tableDepth = 0
   private cur?: { pid?: number; runs: Map<XEl, number>; forced?: ConvHooks['forced'] }
+  /** inlines made so far (a run that makes none is kept as an opaque one) */
+  private made = 0
+  /** runs of the paragraph being read that lie inside a field modeled as one */
+  private inField = new Set<XEl>()
   /** comment threads whose range is open at this point of the body, in the order they opened */
   private open: string[] = []
   /** threads whose range was seen */
@@ -250,16 +316,19 @@ export class Converter {
     if (pid !== undefined) cur.pid = pid
     const saved = this.cur
     this.cur = { pid, runs: collectRuns(el), forced }
+    const savedField = this.inField
+    this.inField = pageFieldRuns(this.cur.runs.keys())
     const parts: Paragraph[] = [cur]
     const sink: Sink = {
       push: (x) => {
+        this.made++
         // pictures, boxes, fields, note references inside w:ins / w:del belong to the change too
         if (this.tc && x.t !== 'text' && !x.tc) x = { ...x, tc: this.tc } as Inline
         const runs = cur.runs
         const last = runs[runs.length - 1]
         if (x.t === 'text' && !x.cm) delete x.cm
         if (
-          x.t === 'text' && last?.t === 'text' && last.href === x.href && last.lk === x.lk &&
+          x.t === 'text' && last?.t === 'text' && last.href === x.href && last.lk === x.lk && last.rp === x.rp &&
           sameRecord(last.s, x.s) && sameRecord(last.d, x.d) && sameMarks(last.cm, x.cm) && sameRecord(last.tc, x.tc)
         )
           last.text += x.text
@@ -282,6 +351,7 @@ export class Converter {
     }
     this.inlines(el.c, base, undefined, undefined, sink)
     this.cur = saved
+    this.inField = savedField
     if (this.fields.length > 0) rec.ro = true
     for (const p of parts) {
       if (rec.ro) p.ro = true
@@ -318,9 +388,14 @@ export class Converter {
         }
         case 'fldSimple': {
           const kind = fieldKind(c.a.instr ?? '')
-          if (kind) {
-            const r = kid(c, 'r')
-            sink.push({ t: 'field', kind, s: merge(base, readRPr(kid(r, 'rPr'), this.theme)), ...(r ? this.srcOf(r) : {}) })
+          const r = kid(c, 'r')
+          const s = merge(base, readRPr(kid(r, 'rPr'), this.theme))
+          if (kind) sink.push({ t: 'field', kind, s, ...this.srcOf(c) })
+          else if (this.cur && !desc(c, 'drawing') && !desc(c, 'pict')) {
+            // a field (DATE, MERGEFIELD…) shows its result and stays whole: one object, written back as it is
+            const text = textOfRuns(c)
+            if (text) sink.push({ t: 'ref', text, s, ...pick(this.srcOf(c), 'src'), ...(this.tc ? { tc: this.tc } : {}) })
+            else sink.push({ t: 'shape', w: 0, h: 0, ...pick(this.srcOf(c), 'src'), ...(this.tc ? { tc: this.tc } : {}) })
           } else this.inlines(c.c, base, href, lk, sink)
           break
         }
@@ -330,6 +405,8 @@ export class Converter {
         case 'moveFrom': {
           const prev = this.tc
           this.tc = { k: c.n === 'ins' || c.n === 'moveTo' ? 'ins' : 'del', id: c.a.id, author: c.a.author, date: c.a.date }
+          // a deletion inside an insertion: both stay (rejecting everything must take the text out)
+          if (this.tc.k === 'del' && prev?.k === 'ins') this.tc.ins = prev
           this.inlines(c.c, base, href, lk, sink)
           this.tc = prev
           break
@@ -350,7 +427,10 @@ export class Converter {
         case 'oMath':
         case 'oMathPara': {
           const text = descAll(c, 't').map((t) => t.t).join('')
-          if (text) sink.push({ t: 'text', text, s: { ...base, i: true, font: '"Cambria Math", "STIX Two Math", serif' } })
+          const s = { ...base, i: true, font: '"Cambria Math", "STIX Two Math", serif' }
+          // an equation is one object: it is written back as it was, not as the flat text shown here
+          if (this.cur) sink.push({ t: 'ref', text, s, ...pick(this.srcOf(c), 'src'), ...(this.tc ? { tc: this.tc } : {}) })
+          else if (text) sink.push({ t: 'text', text, s })
           break
         }
       }
@@ -360,10 +440,22 @@ export class Converter {
   private run(r: XEl, base: RunStyle, href: string | undefined, lk: string | undefined, sink: Sink): void {
     const rPr = kid(r, 'rPr')
     const s = merge<RunStyle>(base, this.styles.char(kid(rPr, 'rStyle')?.a.val), readRPr(rPr, this.theme))
-    if (s.vanish) return
     const { src, d, cm } = this.srcOf(r)
     const tc = this.tc
-    const text = (t: string, style = s, link = href) => sink.push({ t: 'text', text: t, s: style, href: link, lk: link === href ? lk : undefined, src, d, cm, ...(tc ? { tc } : {}) })
+    const made = this.made
+    // what the run holds that is not read into text or an object is not lost: the run stays as an object that is written back as it is
+    const keep = () => {
+      if (this.made === made && src) sink.push({ t: 'shape', w: 0, h: 0, src, ...(tc ? { tc } : {}) })
+    }
+    if (s.vanish) return keep()
+    if (r.c.some((c) => c.n === 'ruby')) {
+      // ruby: the base text is shown, the run with its annotation stays whole
+      const text = textOfRuns(kid(r, 'ruby')!.c.find((c) => c.n === 'rubyBase') ?? r)
+      sink.push({ t: 'ref', text, s, ...(src ? { src } : {}), ...(tc ? { tc } : {}) })
+      return
+    }
+    const rp = rprExtra(rPr)
+    const text = (t: string, style = s, link = href) => sink.push({ t: 'text', text: t, s: style, href: link, lk: link === href ? lk : undefined, src, d, cm, ...(tc ? { tc } : {}), ...(rp ? { rp } : {}) })
     for (const c of r.c) {
       const f = this.fields[this.fields.length - 1]
       switch (c.n) {
@@ -437,6 +529,8 @@ export class Converter {
           break
       }
     }
+    // the runs of a field the converter does not model as one (DATE, MERGEFIELD, TOC…), and runs made of markup it does not read
+    if (r.c.some((c) => !RUN_KNOWN.has(c.n) || ((c.n === 'fldChar' || c.n === 'instrText') && !this.inField.has(r))) || r.a['#mc']) keep()
   }
 
   private target(id: string | undefined): string | undefined {
@@ -895,7 +989,7 @@ export class DocxDocument {
       }
     }
     let capture: Capture | undefined
-    const tb = new TreeBuilder({ emitDepth: 2, onElement: (el) => capture!.element(el) })
+    const tb = new TreeBuilder({ understood: DOCX_UNDERSTOOD, emitDepth: 2, onElement: (el) => capture!.element(el) })
     capture = new Capture(tb, onItem)
     const flush = () => {
       if (!pending.length) return
@@ -956,7 +1050,7 @@ export class DocxDocument {
 
   /** Re-converts generated paragraph XML into blocks (styles, list levels resolved by the engine). */
   reconvert(pid: number, xml: string, map: GenRun[], layer: Layer | undefined, marker?: ListMarker): { blocks: Block[]; rec: ParaRecord } {
-    const root = parseXml(xml)
+    const root = parseXml(xml, undefined, DOCX_UNDERSTOOD)
     const forced: NonNullable<ConvHooks['forced']> = { pid, root, map, layer, marker }
     const conv = new Converter(this.styles, this.numbering, this.theme, this.rels, { forced })
     const out: Block[] = []

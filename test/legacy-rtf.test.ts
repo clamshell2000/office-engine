@@ -130,7 +130,8 @@ describe('code pages', () => {
 
   test('font charsets: double-byte Shift-JIS, symbol fonts', async () => {
     const { paras } = await open(doc(String.raw`\pard\f3 \'82\'a0\'82\'a2\f0  abc \f2\'b7\par`))
-    expect(textOf(paras[0])).toBe('あい abc ')
+    // the Symbol bullet (byte B7) is kept, as the bullet it is
+    expect(textOf(paras[0])).toBe('あい abc •')
   })
 
   test('\\mac and \\pc', async () => {

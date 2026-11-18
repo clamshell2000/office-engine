@@ -48,6 +48,12 @@ export class SaxParser {
   private depth = 0
   private skipDepth = -1
   private relPrefixes = new Set<string>(['r'])
+  /**
+   * Characters at the start of `buf` (an unfinished token) already searched for its end, and the quote the tag scan
+   * was inside: the next chunk resumes there, so a token split over many chunks is scanned once, not once per chunk.
+   */
+  private hint = 0
+  private hintQ = 0
 
   /**
    * @param raw optional tap receiving every consumed source segment verbatim (tags, text, comments…),
@@ -72,15 +78,22 @@ export class SaxParser {
     const s = this.buf
     const n = s.length
     let i = 0
+    const h = this.hint
+    const hq = this.hintQ
+    this.hint = this.hintQ = 0
+    // where to resume looking for the end of the token at `lt` (only the one at the start of the buffer has a hint)
+    const from = (lt: number, min: number) => (lt === 0 ? Math.max(min, h) : min)
+    // the unfinished token starts the buffer: all of it was searched, but the last `keep` characters of a multi-character end
+    const wait = (lt: number, keep = 0) => void (this.hint = Math.max(0, n - lt - keep))
     while (i < n) {
-      const lt = s.indexOf('<', i)
+      const lt = s.indexOf('<', i === 0 && s.charCodeAt(0) !== 60 ? h : i)
       if (lt < 0) {
         if (final) {
           const seg = s.substring(i)
           this.raw?.(seg)
           this.onText(seg)
           i = n
-        }
+        } else this.hint = n - i
         break
       }
       if (lt > i) {
@@ -92,16 +105,22 @@ export class SaxParser {
       if (lt + 1 >= n) break
       const c = s.charCodeAt(lt + 1)
       if (c === 47) {
-        const gt = s.indexOf('>', lt + 2)
-        if (gt < 0) break
+        const gt = s.indexOf('>', from(lt, lt + 2))
+        if (gt < 0) {
+          wait(lt)
+          break
+        }
         this.raw?.(s.substring(lt, gt + 1))
         this.onClose(s.substring(lt + 2, gt))
         i = gt + 1
         continue
       }
       if (c === 63) {
-        const e = s.indexOf('?>', lt + 2)
-        if (e < 0) break
+        const e = s.indexOf('?>', from(lt, lt + 2))
+        if (e < 0) {
+          wait(lt, 1)
+          break
+        }
         this.raw?.(s.substring(lt, e + 2))
         i = e + 2
         continue
@@ -109,29 +128,38 @@ export class SaxParser {
       if (c === 33) {
         if (n - lt < 9 && !final) break
         if (s.startsWith('<!--', lt)) {
-          const e = s.indexOf('-->', lt + 4)
-          if (e < 0) break
+          const e = s.indexOf('-->', from(lt, lt + 4))
+          if (e < 0) {
+            wait(lt, 2)
+            break
+          }
           this.raw?.(s.substring(lt, e + 3))
           i = e + 3
           continue
         }
         if (s.startsWith('<![CDATA[', lt)) {
-          const e = s.indexOf(']]>', lt + 9)
-          if (e < 0) break
+          const e = s.indexOf(']]>', from(lt, lt + 9))
+          if (e < 0) {
+            wait(lt, 2)
+            break
+          }
           this.raw?.(s.substring(lt, e + 3))
           if (this.skipDepth < 0) this.h.text(s.substring(lt + 9, e))
           i = e + 3
           continue
         }
-        const e = s.indexOf('>', lt + 2)
-        if (e < 0) break
+        const e = s.indexOf('>', from(lt, lt + 2))
+        if (e < 0) {
+          wait(lt)
+          break
+        }
         this.raw?.(s.substring(lt, e + 1))
         i = e + 1
         continue
       }
       let gt = -1
-      let q = 0
-      for (let j = lt + 1; j < n; j++) {
+      let q = lt === 0 && h > 1 ? hq : 0
+      for (let j = lt === 0 && h > 1 ? h : lt + 1; j < n; j++) {
         const cc = s.charCodeAt(j)
         if (q !== 0) {
           if (cc === q) q = 0
@@ -141,7 +169,11 @@ export class SaxParser {
           break
         }
       }
-      if (gt < 0) break
+      if (gt < 0) {
+        wait(lt)
+        this.hintQ = q
+        break
+      }
       this.raw?.(s.substring(lt, gt + 1))
       this.onOpen(s, lt + 1, gt)
       i = gt + 1
@@ -276,9 +308,24 @@ export interface TreeBuilderOptions {
   onShallowOpen?: (name: string, attrs: Attrs, depth: number) => void
   /** Element local names whose subtree is dropped. */
   skip?: Set<string>
+  /**
+   * Namespace prefixes a reader understands: an mc:Choice is taken only when everything it `Requires` is in the set,
+   * else the mc:Fallback is (content the reader cannot model stays out of the tree, and its source with it).
+   * Unset: the first mc:Choice always wins.
+   */
+  understood?: ReadonlySet<string>
 }
 
-/** Builds XEl trees; resolves mc:AlternateContent by taking the first mc:Choice. */
+/** What a docx reader models of the markup Word 365 hides in mc:Choice: drawings, shapes, groups, newer drawing / run extensions. */
+export const DOCX_UNDERSTOOD: ReadonlySet<string> = new Set(['wps', 'wpg', 'wpc', 'wpi', 'wp14', 'w14', 'w15', 'a14', 'a16'])
+
+/** whether every namespace an mc:Choice `Requires` (space separated prefixes) is understood */
+export function choiceUnderstood(requires: string | undefined, understood: ReadonlySet<string>): boolean {
+  const names = (requires ?? '').split(/\s+/).filter(Boolean)
+  return names.length > 0 && names.every((x) => understood.has(x))
+}
+
+/** Builds XEl trees; resolves mc:AlternateContent by taking the first mc:Choice (see `understood`). */
 export class TreeBuilder implements SaxHandler {
   root: XEl | null = null
   private stack: Frame[] = []
@@ -289,15 +336,27 @@ export class TreeBuilder implements SaxHandler {
   constructor(private o: TreeBuilderOptions = {}) {}
 
   open(name: string, a: Attrs): boolean | void {
-    if (name === 'Fallback' || this.o.skip?.has(name)) return true
+    if (this.o.skip?.has(name)) return true
+    if (name === 'Fallback') {
+      // the fallback stands in when no choice was understood
+      if (this.o.understood && this.alt.length && !this.alt[this.alt.length - 1]) {
+        this.alt[this.alt.length - 1] = true
+        this.stack.push(TRANSPARENT)
+        return
+      }
+      return true
+    }
     if (name === 'AlternateContent') {
+      // the element holding it is marked: what the reader does not model of it must still be kept
+      const holder = this.parents[this.parents.length - 1]
+      if (holder && this.o.understood) holder.a['#mc'] = '1'
       this.alt.push(false)
       this.stack.push(TRANSPARENT)
       return
     }
     if (name === 'Choice' && this.alt.length) {
       const top = this.alt.length - 1
-      if (this.alt[top]) return true
+      if (this.alt[top] || (this.o.understood && !choiceUnderstood(a.Requires, this.o.understood))) return true
       this.alt[top] = true
       this.stack.push(TRANSPARENT)
       return
@@ -336,8 +395,8 @@ export class TreeBuilder implements SaxHandler {
   }
 }
 
-export function parseXml(xml: string, skip?: Set<string>): XEl {
-  const tb = new TreeBuilder({ skip })
+export function parseXml(xml: string, skip?: Set<string>, understood?: ReadonlySet<string>): XEl {
+  const tb = new TreeBuilder({ skip, understood })
   const p = new SaxParser(tb)
   p.write(xml)
   p.end()

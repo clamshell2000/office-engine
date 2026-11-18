@@ -68,6 +68,13 @@ export function deleteRow(t: Table, ri: number): Table | null {
   for (const c of cells) {
     if (c.ri < ri && c.ri + c.cell.rowSpan > ri) rows[c.ri].cells[c.ci] = { ...rows[c.ri].cells[c.ci], rowSpan: c.cell.rowSpan - 1 }
   }
+  // a merged cell that starts in the row goes on in the next one (alone there when one row of it is left): else that row loses its column
+  const next = ri + 1
+  const starts = cells.filter((c) => c.ri === ri && c.cell.rowSpan > 1).sort((a, b) => b.g - a.g)
+  for (const c of starts) {
+    const before = cells.filter((x) => x.ri === next && x.g < c.g).length
+    rows[next].cells.splice(before, 0, { ...c.cell, rowSpan: c.cell.rowSpan - 1 })
+  }
   rows.splice(ri, 1)
   return { ...t, rows }
 }

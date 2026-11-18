@@ -176,6 +176,8 @@ function indexPlaceholders(spTree: XEl | undefined) {
 }
 
 function romanize(n: number): string {
+  // a start number comes straight from the file (up to 2^31): past what Roman numerals spell, the number itself
+  if (!(n > 0 && n <= 3999)) return String(n)
   const map: [number, string][] = [[1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'], [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']]
   let s = ''
   for (const [v, r] of map) while (n >= v) (s += r), (n -= v)
@@ -183,7 +185,7 @@ function romanize(n: number): string {
 }
 
 function autoNum(type: string, n: number): string {
-  const alpha = (k: number) => String.fromCharCode(97 + ((k - 1) % 26)).repeat(Math.floor((k - 1) / 26) + 1)
+  const alpha = (k: number) => (k > 0 && k <= 2600 ? String.fromCharCode(97 + ((k - 1) % 26)).repeat(Math.floor((k - 1) / 26) + 1) : String(k))
   let core = String(n)
   if (type.startsWith('alphaLc')) core = alpha(n)
   else if (type.startsWith('alphaUc')) core = alpha(n).toUpperCase()

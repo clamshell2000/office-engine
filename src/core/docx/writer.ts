@@ -11,7 +11,7 @@ import {
   escText, type RChild, type RNode,
 } from '../raw'
 import type { Theme } from '../theme'
-import { kid, parseXml, type XEl } from '../xml'
+import { DOCX_UNDERSTOOD, kid, parseXml, type XEl } from '../xml'
 import { Numbering } from './numbering'
 import { fixCommentMarks, markEnd, markStart, numbering as commentNumbering, writeDocxComments } from './comments'
 import type { DocxDocument, GenRun } from './parser'
@@ -40,7 +40,9 @@ const RPR_ORDER = [
 // move ranges are dropped: a regenerated paragraph writes moved text back as plain w:ins / w:del
 const START_MARKS = new Set(['bookmarkStart', 'commentRangeStart', 'permStart'])
 const END_MARKS = new Set(['bookmarkEnd', 'commentRangeEnd', 'permEnd'])
-const RUN_STOP = new Set(['p', 'oMath', 'oMathPara', 'pPr', 'rPr', 'r'])
+const RUN_STOP = new Set(['p', 'oMath', 'oMathPara', 'pPr', 'rPr', 'r', 'fldSimple'])
+// what counts as a run for the ordinals (as the converter's collectRuns): equations and simple fields are kept whole
+const RUN_LIKE = new Set(['r', 'oMath', 'oMathPara', 'fldSimple'])
 const HL_NAME: Record<string, string> = dict(Object.fromEntries(Object.entries(HIGHLIGHT).map(([k, v]) => [v, k])))
 
 interface ParaLoc {
@@ -57,7 +59,7 @@ export function collectParasRaw(nodes: RChild[]): ParaLoc[] {
     if (local(n.q) === 'p') out.push({ node: n, list: nodes, index: i })
     walkOoxml(n, (c, parent, idx) => {
       if (local(c.q) === 'p') out.push({ node: c, list: parent.c, index: idx })
-    })
+    }, DOCX_UNDERSTOOD)
   })
   return out
 }
@@ -66,9 +68,9 @@ export function collectRunsRaw(p: RNode): RNode[] {
   const out: RNode[] = []
   walkOoxml(p, (c) => {
     const l = local(c.q)
-    if (l === 'r') out.push(c)
+    if (RUN_LIKE.has(l)) out.push(c)
     return RUN_STOP.has(l)
-  })
+  }, DOCX_UNDERSTOOD)
   return out
 }
 
@@ -483,7 +485,9 @@ function delTextXml(text: string, W: string): string {
 function trackXml(doc: DocxDocument, W: string, tc: TrackMark, run: string): string {
   const tag = tc.k === 'ins' ? 'ins' : 'del'
   const attrs = ` ${W}id="${doc.nextTrackId++}"` + (tc.author ? ` ${W}author="${escText(tc.author).replace(/"/g, '&quot;')}"` : '') + (tc.date ? ` ${W}date="${escText(tc.date)}"` : '')
-  return `<${W}${tag}${attrs}>${run}</${W}${tag}>`
+  const out = `<${W}${tag}${attrs}>${run}</${W}${tag}>`
+  // text deleted after someone inserted it: the deletion inside the insertion, as Word writes it
+  return tc.k === 'del' && tc.ins ? trackXml(doc, W, tc.ins, out) : out
 }
 
 export async function genParagraph(doc: DocxDocument, spec: ParaSpec): Promise<{ xml: string; map: GenRun[] }> {
@@ -835,7 +839,7 @@ export async function genTable(doc: DocxDocument, spec: TableSpec): Promise<stri
       else walkOoxml(top, (n) => {
         if (!orig && local(n.q) === 'tbl') orig = n
         return !!orig
-      })
+      }, DOCX_UNDERSTOOD)
     }
   }
   const W = orig ? prefixOf(orig.q) || 'w:' : 'w:'

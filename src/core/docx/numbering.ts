@@ -28,7 +28,13 @@ const BULLETS: Record<string, string> = dict({
   '\uF02D': '–', '\u00B7': '•', '\uF0BE': '—', '\uF06F': '○', '\uF09F': '•', '\uF0FE': '☑', o: '◦',
 })
 
+// a start value comes straight from the file (up to 2^31): past these the marker is plain decimal, as markers beyond
+// what the format can sensibly spell would be megabytes of text
+const MAX_ROMAN = 3999
+const MAX_LETTER = 26 * 100
+
 function roman(n: number): string {
+  if (!(n > 0 && n <= MAX_ROMAN)) return String(n)
   const map: [number, string][] = [
     [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
     [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
@@ -40,6 +46,7 @@ function roman(n: number): string {
 
 function letters(n: number): string {
   if (n <= 0) return ''
+  if (n > MAX_LETTER) return String(n)
   const ch = String.fromCharCode(97 + ((n - 1) % 26))
   return ch.repeat(Math.floor((n - 1) / 26) + 1)
 }

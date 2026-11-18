@@ -14,6 +14,8 @@ export interface RRun {
   cm?: string[]
   /** tracked change the run belongs to (DOCX) */
   tc?: object
+  /** source run properties beyond the style (DOCX): runs that differ in it stay apart */
+  rp?: string
 }
 
 export interface Pos {
@@ -48,7 +50,7 @@ function shallowEq(a: object | undefined, b: object | undefined): boolean {
 export const sameMarks = (a: string[] | undefined, b: string[] | undefined) => (a?.length ?? 0) === (b?.length ?? 0) && (!a || a.every((x, i) => b![i] === x))
 
 const sameText = (a: RRun, b: RRun) =>
-  a.t === 'text' && b.t === 'text' && a.href === b.href && a.lk === b.lk && shallowEq(a.s, b.s) && shallowEq(a.d, b.d) && sameMarks(a.cm, b.cm) && shallowEq(a.tc, b.tc)
+  a.t === 'text' && b.t === 'text' && a.href === b.href && a.lk === b.lk && shallowEq(a.s, b.s) && shallowEq(a.d, b.d) && sameMarks(a.cm, b.cm) && shallowEq(a.tc, b.tc) && a.rp === b.rp
 
 /**
  * Comment threads text inserted at `o` joins: those covering both the character before and the one after (typing at
