@@ -230,7 +230,7 @@ export class Engine {
       case 'xlsx.text':
         return this.need(this.xlsx).text(args[0] as number, args[1] as string)
       case 'pptx.setText':
-        return this.need(this.pptx).setText(args[0] as number, args[1] as number, args[2] as PParaSpec[])
+        return this.need(this.pptx).setText(args[0] as number, args[1] as number, args[2] as PParaSpec[], args[3] as [number, number] | undefined)
       case 'pptx.shapes':
         return shapeOps(this.need(this.pptx), args[0] as number, args[1] as ShapeOp[])
       case 'pptx.slides':

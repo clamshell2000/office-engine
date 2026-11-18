@@ -190,10 +190,11 @@ Diagram sources open as a document holding the drawing (an SVG picture, editable
 
 ### PPTX
 
-- **Text**: font, size, B/I/U/S, color, highlight, superscript/subscript, alignment, vertical alignment, line spacing, bullet/numbered list, indent level, clear formatting
+- **Text**: font, size, B/I/U/S, color, highlight, superscript/subscript, alignment, vertical alignment, line spacing, bullet/numbered list, indent level (also Tab / Shift+Tab in a list item), clear formatting; the text of table cells is edited like a shape's (click a cell; Tab / Shift+Tab move between cells; Delete in a cell edits the text, with the table selected as an object it deletes the table)
 - **Shapes**: select/drag/resize/delete (arrow keys to nudge), fill, border color/weight/dash, arrange (front/forward/backward/back), rotate 90°/flip, align on slide, duplicate (⌘D), undo/redo
 - **Insert**: 30 shapes, text box, image
-- **Slides**: background, add/duplicate/delete/move/hide, slideshow from current slide or beginning
+- **Slides**: background, add/duplicate/delete/move/hide (all undoable, also a deleted slide with its notes and comments), slideshow from current slide or beginning
+- **Speaker notes**: read from the notes slide (also of converted `.ppt` / `.odp`) and included in *Download as plain text*; not shown or edited in the view
 - **Other**: context menus on shapes/slides/thumbnails
 
 ### Toolbar
@@ -261,6 +262,6 @@ Comment text is plain (lines kept); formatting inside comments read from a file 
 - Formulas: no defined names, structured refs (`Table1[Col]`), 3-D refs
 - DOCX: text boxes and nested tables are read-only; paragraphs with fields spanning multiple paragraphs (TOC) are read-only; headers / footers are edited as text lines (pictures, tables and shapes in them are replaced when edited, with a warning); a header taller than the top margin overlaps the text; tracked changes don't cover formatting changes, paragraph marks or pictures; page setup applies to the whole document (not per section)
 - XLSX: no chart/pivot/conditional format/data validation/filter editing; a table whose cells are all deleted stays in the file; cells cut and pasted do not take their merges, comments or conditional formats along; a sheet read by pages (a CSV past 12 million cells) takes no row / column insert or delete, and its formulas only the rows that fit in memory
-- PPTX: can't rotate shapes with the mouse yet, can't edit text inside tables yet, no table insert, no animations/transitions; slide list changes (add/delete/move) are not undoable
+- PPTX: can't rotate shapes with the mouse yet, no table insert / row or column edit (Tab in the last cell adds no row), no animations/transitions, speaker notes are not editable; undo of slide list changes (add/delete/move) is not available in a shared (collaborative) session
 - Comments: plain text only; DOCX comments can't cover text in more than one table cell or across a table; comments in headers, footers and footnotes are kept but not shown; XLSX comments don't move with sorted rows; PPTX comments anchored to a shape are shown at the shape's position when the file is opened and keep that anchor until moved
 - Files from someone else: nothing a file says is used as an address to load when it is opened (a color that is not a color, a link that is not a web / mail / phone link and a name the format does not know are ignored; pictures linked from outside the file are not fetched). A package is refused, with a message, when it names a part twice (also by case), holds more than 200,000 files, has a part that unpacks to more than 1 GB (16 GB for sheet data and the document body, which are streamed) or nests XML deeper than 1,024 elements
