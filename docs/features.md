@@ -150,12 +150,14 @@ Diagram sources open as a document holding the drawing (an SVG picture, editable
 
 | File                                         | Draws                                                                                                                |
 |----------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `.mmd`, `.mermaid`                           | Mermaid: flowchart / graph, sequence, class, state, ER, pie, Gantt, mind map                                         |
+| `.mmd`, `.mermaid`                           | Mermaid: flowchart / graph, sequence (with `box`), class, state, ER, pie, Gantt, mind map                            |
 | `.puml`, `.plantuml`, `.pu`, `.iuml`, `.wsd` | PlantUML: sequence, class / object, use case, component / deployment, state, activity, mind map, WBS, `@startdot`    |
 | `.dot`, `.gv`                                | Graphviz DOT: graph / digraph, clusters, default attributes, edge chains, `rank=same`, record and HTML labels (text) |
 
 - **In other files**: ` ```mermaid `, ` ```plantuml ` / ` ```puml `, ` ```dot ` / ` ```graphviz ` code blocks in Markdown, and `<pre class="mermaid">`, `<div class="mermaid">`, `<pre><code class="language-…">` blocks in HTML are drawn in place; other code blocks stay code
 - **Format**: the extension, else the MIME type (`text/vnd.graphviz`…), else the content: `@startuml`, `digraph {`, a Mermaid header (`graph TD`, `sequenceDiagram`…), also for a Blob or URL served as `text/plain`. A `.dot` file that is a Word 97 template (binary) is not read as a graph
+- **Syntax**: PlantUML names and aliases as in the official examples (`actor Guest as g`, `actor "Guest User" as g`, `actor g as "Guest User"`), one-line deployment elements (`agent`, `artifact`, `card`, `cloud`, `file`, `folder`, `frame`, `stack`, `storage`…), state descriptions (`S : text`), activity swimlanes and notes, preprocessing (`!define` with arguments, `!$var`, `!if` / `!ifdef` / `!else` / `!endif`); Mermaid markdown strings (read as their text), quoted edge labels, edge ids (`A e1@--> B`); DOT `strict`
+- **Errors**: a Mermaid flowchart / sequence line, or a DOT text, that cannot be read is reported with its line number instead of a partial drawing (comments and supported-but-ignored directives are not errors)
 - **Layout**: layered, like Mermaid's and Graphviz's `dot` (ranks, fewer crossings, straight long edges, clusters kept apart); `TB` / `LR` / `BT` / `RL`; node shapes, edge labels, arrowheads (UML, crow's foot), colors from `classDef` / `style` / DOT attributes
 - **Page**: the drawing is scaled down to fit the page; a wide one gets a landscape page. Several diagrams in one file (PlantUML blocks, DOT graphs) are drawn one after another
 - **Safe**: the text is escaped, colors are kept only when they are plain colors, and the picture has no scripts, links or external references
