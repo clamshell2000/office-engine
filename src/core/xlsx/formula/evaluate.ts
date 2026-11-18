@@ -5,17 +5,23 @@ import { FUNCTIONS } from './functions'
 import { FormulaSyntaxError } from './lexer'
 import { parseFormula, type Ast, type BinOp } from './parser'
 import { sameSheet, type RefAddr } from './refs'
+import { references } from './transform'
 import { ERR, EvalSignal, FormulaError, MAX_COL, MAX_ROW, UnsupportedFormula, type CellProvider, type EvalContext, type Value } from './types'
 import { ArrayV, compare, RangeV, toNum, toStr, UnionV, type Val } from './values'
 
-function arith(op: BinOp, x: number, y: number): Value {
+/** the last + or - of a formula gives 0 for what is only the noise of the binary digits left (0.1+0.2-0.3), as in Excel */
+const NOISE = 1e-15
+
+function arith(op: BinOp, x: number, y: number, last = false): Value {
   let r: number
   switch (op) {
     case '+':
       r = x + y
+      if (last && Math.abs(r) <= NOISE * Math.max(Math.abs(x), Math.abs(y))) r = 0
       break
     case '-':
       r = x - y
+      if (last && Math.abs(r) <= NOISE * Math.max(Math.abs(x), Math.abs(y))) r = 0
       break
     case '*':
       r = x * y
@@ -32,7 +38,7 @@ function arith(op: BinOp, x: number, y: number): Value {
   return Number.isFinite(r) ? r : ERR.NUM
 }
 
-export function binop(op: BinOp, a: Value, b: Value): Value {
+export function binop(op: BinOp, a: Value, b: Value, last = false): Value {
   if (a instanceof FormulaError) return a
   if (b instanceof FormulaError) return b
   switch (op) {
@@ -55,7 +61,7 @@ export function binop(op: BinOp, a: Value, b: Value): Value {
   if (x instanceof FormulaError) return x
   const y = toNum(b)
   if (y instanceof FormulaError) return y
-  return arith(op, x, y)
+  return arith(op, x, y, last)
 }
 
 type Operand = Value | Value[][]
@@ -85,8 +91,13 @@ export class Evaluator implements Ev {
   readonly r: number
   readonly c: number
   private readonly strict: boolean
+  /** the formula being evaluated: its last operation is the one that rounds noise to zero */
+  private root: Ast | undefined
+  /** the larger extent of the sheets the whole columns / rows of the formula are on (see `clip`) */
+  private extent: { rows: number; cols: number } | undefined
 
-  constructor(ctx: EvalContext) {
+  constructor(ctx: EvalContext, root?: Ast) {
+    this.root = root
     this.provider = ctx.provider
     this.sheet = ctx.sheet
     this.r = ctx.r
@@ -145,7 +156,8 @@ export class Evaluator implements Ev {
         const l = this.operand(this.eval(ast.left, top), top)
         const r = this.operand(this.eval(ast.right, top), top)
         const op = ast.op
-        return map2(l, r, (a, b) => binop(op, a, b))
+        const last = ast === this.root
+        return map2(l, r, (a, b) => binop(op, a, b, last))
       }
       case 'call':
         return this.call(ast.name, ast.args, top)
@@ -154,6 +166,8 @@ export class Evaluator implements Ev {
 
   private ref(a: RefAddr): Val {
     if (a.sheet !== undefined && !this.hasSheet(a.sheet)) return ERR.REF
+    // past Excel's last row only a sheet read from a large text file has such rows: no row there, no cell (a name, as in Excel)
+    if (a.r1 > MAX_ROW && a.r1 >= (this.provider.bounds?.(a.sheet ?? this.sheet).rows ?? 0)) return ERR.NAME
     return new RangeV(a.sheet ?? this.sheet, a.r0, a.c0, a.r1, a.c1)
   }
 
@@ -188,14 +202,39 @@ export class Evaluator implements Ev {
     return v === undefined ? null : v
   }
 
+  /**
+   * The rows and columns of the longest sheet among those the formula has whole columns / rows of: `A:A` and `B:B` of
+   * two sheets must have the same size (SUMPRODUCT(Data!C:C,T!A:A)), as they do in Excel, without reading the blank
+   * rows of a million.
+   */
+  private wholeExtent(): { rows: number; cols: number } {
+    if (this.extent) return this.extent
+    let rows = 0
+    let cols = 0
+    if (this.root && this.provider.bounds) {
+      const seen = new Set<string>()
+      for (const ref of references(this.root)) {
+        if (!('r0' in ref) || (ref.r1 < MAX_ROW && ref.c1 < MAX_COL)) continue
+        const key = (ref.sheet ?? this.sheet ?? '').toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        const b = this.provider.bounds(ref.sheet ?? this.sheet)
+        rows = Math.max(rows, b.rows)
+        cols = Math.max(cols, b.cols)
+      }
+    }
+    return (this.extent = { rows, cols })
+  }
+
   /** Clip whole-row/whole-column style ranges to the provider's used extent. */
   private clip(rg: RangeV): { r1: number; c1: number } {
     let { r1, c1 } = rg
-    if ((r1 === MAX_ROW || c1 === MAX_COL) && this.provider.bounds) {
+    if ((r1 >= MAX_ROW || c1 === MAX_COL) && this.provider.bounds) {
       const b = this.provider.bounds(rg.sheet)
+      const ext = this.wholeExtent()
       // a whole column is all the rows the sheet has: more than Excel's when it was read from a large text file
-      if (r1 === MAX_ROW) r1 = Math.max(rg.r0, b.rows - 1)
-      if (c1 === MAX_COL) c1 = Math.max(rg.c0, Math.min(c1, b.cols - 1))
+      if (r1 >= MAX_ROW) r1 = Math.max(rg.r0, Math.max(b.rows, ext.rows) - 1)
+      if (c1 === MAX_COL) c1 = Math.max(rg.c0, Math.min(c1, Math.max(b.cols, ext.cols) - 1))
     }
     return { r1, c1 }
   }
@@ -278,7 +317,7 @@ export function evaluate(ast: Ast, ctx: EvalContext): Value {
   const prev = getDate1904()
   setDate1904(!!ctx.provider.date1904)
   try {
-    const ev = new Evaluator(ctx)
+    const ev = new Evaluator(ctx, ast)
     const v = ev.eval(ast, true)
     const x = v instanceof RangeV ? ev.intersect(v) : v instanceof ArrayV ? v.data[0][0] : v instanceof UnionV ? ERR.VALUE : v
     if (x === null) return 0
@@ -301,7 +340,7 @@ export function evaluateArray(ast: Ast, ctx: EvalContext, h: number, w: number):
   setDate1904(!!ctx.provider.date1904)
   const fill = (f: (i: number, j: number) => Value) => Array.from({ length: h }, (_, i) => Array.from({ length: w }, (_, j) => f(i, j)))
   try {
-    const ev = new Evaluator(ctx)
+    const ev = new Evaluator(ctx, ast)
     const v = ev.eval(ast, false)
     const data = v instanceof UnionV ? [[ERR.VALUE as Value]] : ev.toArray(v)
     return fill((i, j) => {
