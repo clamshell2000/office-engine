@@ -96,6 +96,28 @@ describe('QA 2: lists', () => {
     // the emptied item is the plain paragraph that now holds "After": no empty bullet is left behind
     expect(all.filter((p) => p.lst).length).toBe(2)
   })
+
+  test('N2-006: so does Enter coming before the worker has said the paragraph is a list (the button, then keys without a frame between)', async () => {
+    const v = await blank()
+    await v.page.keyboard.insertText('One')
+    await v.page.waitForTimeout(200)
+    // the click and the keys in one task: nothing the worker answers gets in between
+    await v.page.evaluate(() => {
+      const root = document.querySelector('.de-pages')!
+      const fire = (inputType: string, data?: string) => root.dispatchEvent(new InputEvent('beforeinput', { inputType, data, bubbles: true, cancelable: true, composed: true }))
+      document.querySelector<HTMLButtonElement>('button[aria-label^="Bulleted list"]')!.click()
+      fire('insertParagraph')
+      for (const ch of 'Two') fire('insertText', ch)
+      fire('insertParagraph')
+      fire('insertParagraph')
+      for (const ch of 'After') fire('insertText', ch)
+    })
+    await v.page.waitForTimeout(500)
+    const all = paras(await saved(v))
+    expect(all.filter((p) => paraText(p)).map((p) => [paraText(p), !!p.lst])).toEqual([['One', true], ['Two', true], ['After', false]])
+    expect(all.filter((p) => p.lst).length).toBe(2)
+    expect(v.errors).toEqual([])
+  })
 })
 
 describe('QA 2: links', () => {

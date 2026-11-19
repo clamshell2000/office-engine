@@ -712,6 +712,11 @@ describe('xlsx sheets and merging (QA 19/11/2026, N1-018, N1-019)', () => {
     await v.page.keyboard.press('Enter')
   }
   const tabs = (v: Viewer) => v.page.locator('.de-tab[role=tab]').allInnerTexts()
+  /** the name of tab `i`, once it is `want` (the message about a name comes before the worker has renamed the sheet) */
+  const tabName = async (v: Viewer, i: number, want: string) => {
+    for (let k = 0; k < 60 && (await tabs(v))[i] !== want; k++) await v.page.waitForTimeout(50)
+    return (await tabs(v))[i]
+  }
 
   test('N1-018: a refused sheet name says why; a name that was cut or changed says so', async () => {
     const v = await open()
@@ -723,10 +728,10 @@ describe('xlsx sheets and merging (QA 19/11/2026, N1-018, N1-019)', () => {
     expect(await tabs(v)).toEqual(['Sales', 'Notes', 'Data'])
     await rename(v, 'Notes', 'x'.repeat(40))
     expect(await v.toast()).toMatch(/31 characters/)
-    expect((await tabs(v))[1]).toBe('x'.repeat(31))
+    expect(await tabName(v, 1, 'x'.repeat(31))).toBe('x'.repeat(31))
     await rename(v, 'x'.repeat(31), 'a/b?c')
     expect(await v.toast()).toMatch(/cannot contain/i)
-    expect((await tabs(v))[1]).toBe('a_b_c')
+    expect(await tabName(v, 1, 'a_b_c')).toBe('a_b_c')
     // a plain rename says nothing
     await v.page.waitForTimeout(100)
     await rename(v, 'a_b_c', 'Budget')

@@ -192,6 +192,14 @@ function moveSel(sel: Sel, from: string, to: string): Sel {
 /** a model change: contiguous paragraphs replaced, or top-level blocks replaced */
 export type DocxCommit = { kind: 'paras'; before: Paragraph[]; next: Paragraph[] } | { kind: 'blocks'; bi: number; before: Block[]; next: Block[] }
 
+/**
+ * The list a paragraph is in: what the last edit of it asks for (`pd.list`) while the worker has not said yet what the
+ * paragraph became (`lst` comes with its answer, later), else what the document says. A key coming right after
+ * "Bulleted list" or an Enter acts on the paragraph as it is being made, not as it was.
+ */
+const listOf = (p: Paragraph | undefined): 'bullet' | 'number' | undefined => (!p ? undefined : p.pd?.list !== undefined ? (p.pd.list === 'none' ? undefined : p.pd.list) : p.lst)
+const levelOf = (p: Paragraph): number => p.pd?.ilvl ?? p.ilvl ?? 0
+
 export class DocxEditor implements RichHost<Paragraph> {
   readonly input: RichInput
   private pendSel: Sel | null = null
@@ -902,7 +910,7 @@ export class DocxEditor implements RichHost<Paragraph> {
     if (!sel) return
     const r = this.selectedParas(sel)
     if (!r) return
-    const all = r.pas.every((pa) => this.para(pa)?.lst === kind)
+    const all = r.pas.every((pa) => listOf(this.para(pa)) === kind)
     this.setPara({ list: all ? 'none' : kind, ilvl: all ? undefined : 0 }, {}, sel)
   }
 
@@ -913,9 +921,9 @@ export class DocxEditor implements RichHost<Paragraph> {
     const next = r.pas.map((pa) => {
       const p = this.para(pa)!
       const pd: ParaDirty = { ...(p.pd ?? {}) }
-      if (p.lst) pd.ilvl = Math.max(0, Math.min(8, (p.ilvl ?? 0) + dir))
+      if (listOf(p)) pd.ilvl = Math.max(0, Math.min(8, levelOf(p) + dir))
       else pd.indL = Math.max(0, (p.ps.indL ?? 0) + dir * 36)
-      return { ...p, pd, ps: p.lst ? p.ps : { ...p.ps, indL: pd.indL }, edited: true }
+      return { ...p, pd, ps: listOf(p) ? p.ps : { ...p.ps, indL: pd.indL }, edited: true }
     })
     this.replace(r.pas, next, sel, { label: 'para', want: true })
   }
@@ -938,22 +946,22 @@ export class DocxEditor implements RichHost<Paragraph> {
       return true
     }
     const p = this.para(sel.a.pa)
-    if (!p?.lst) return false
+    if (!listOf(p)) return false
     this.indent(shift ? -1 : 1, sel)
     return true
   }
 
   backspaceAtStart(pa: string, p: Paragraph): boolean {
-    if (!p.lst) return false
+    if (!listOf(p)) return false
     this.setPara({ list: 'none' }, {}, { a: { pa, o: 0 }, f: { pa, o: 0 } })
     return true
   }
 
   /** Enter in an empty list item goes one level out, and at the first level ends the list (Word, Docs) */
   enterAtEmpty(pa: string, p: Paragraph): boolean {
-    if (!p.lst) return false
+    if (!listOf(p)) return false
     const at = { a: { pa, o: 0 }, f: { pa, o: 0 } }
-    if ((p.ilvl ?? 0) > 0) this.indent(-1, at)
+    if (levelOf(p) > 0) this.indent(-1, at)
     else this.setPara({ list: 'none' }, {}, at)
     return true
   }
