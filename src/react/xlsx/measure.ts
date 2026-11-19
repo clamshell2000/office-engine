@@ -36,3 +36,11 @@ export function wrapHeight(text: string, css: Css, base: Base, basePx: number, w
   el.remove()
   return Math.ceil(h) + 1
 }
+
+/** height in px a row needs to show a line of `text` turned by `rot` degrees (255: stacked, a letter per line) */
+export function rotatedHeight(text: string, css: Css, base: Base, basePx: number, rot: number): number {
+  const line = fontPx(css.fontSize as string | number | undefined, basePx) * 1.2
+  if (rot === 255) return Math.ceil([...text].length * line) + 3
+  const a = (Math.min(90, Math.abs(rot)) * Math.PI) / 180
+  return Math.ceil(textWidth(text, css, base, basePx) * Math.sin(a) + line * Math.cos(a)) + 3
+}

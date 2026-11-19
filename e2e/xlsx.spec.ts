@@ -874,6 +874,75 @@ describe('xlsx layout (QA 19/11/2026, N1-021, N1-023)', () => {
     expect(v.errors).toEqual([])
   })
 
+  test('N1-012: a number in a column of the default width is shown in what fits, in the font the browser has: never wider than its cell', async () => {
+    const v = await open()
+    const typed = ['1234567', '0.123456789', '123456789012', '-1234567.891', '0.000012345678']
+    for (const [i, t] of typed.entries()) await v.typeCell(`K${20 + i}`, t)
+    await v.clickCell('J10')
+    for (const [i, t] of typed.entries()) {
+      const p = await v.cellPoint(`K${20 + i}`)
+      const box = await v.page.evaluate(({ x, y }) => {
+        const cell = document.elementsFromPoint(x, y).map((e) => e.closest<HTMLElement>('.de-cell')).find(Boolean)!
+        const span = cell.querySelector('span')!
+        return { text: span.textContent ?? '', left: span.getBoundingClientRect().left, cellLeft: cell.getBoundingClientRect().left }
+      }, p)
+      // (a number is drawn from the right edge: one too wide loses its first digits)
+      expect(box.left).toBeGreaterThanOrEqual(box.cellLeft)
+      expect(box.text).not.toMatch(/^#/)
+      // (how many digits fit is the font's business: the first one at least)
+      expect(Number(box.text)).toBeCloseTo(Number(t), -Math.floor(Math.log10(Math.abs(Number(t)))))
+    }
+    expect(v.errors).toEqual([])
+  })
+
+  test('N1-023: a number format typed by hand ("Custom format…")', async () => {
+    const v = await open()
+    await v.typeCell('J10', '1234567')
+    await v.typeCell('J11', '2024-01-15')
+    const custom = async (ref: string, code: string) => {
+      await v.clickCell(ref)
+      await v.pick('Number format', 'Custom format…')
+      const input = v.page.locator('.de-tb-pop .de-prompt input')
+      await input.fill(code)
+      await input.press('Enter')
+      await v.page.waitForTimeout(300)
+    }
+    await custom('J10', '#,##0 "đ"')
+    expect(await v.shown('J10')).toBe('1,234,567 đ')
+    await custom('J11', 'ddd dd/mm')
+    expect(await v.shown('J11')).toBe('Mon 15/01')
+    // the grid has the keys again, and the format of the cell is offered as "Custom"
+    await v.clickCell('J10')
+    expect(await v.page.locator('button[aria-label^="Number format"]').first().getAttribute('aria-label')).toBe('Number format: Custom')
+    const s = await saved(v)
+    expect(s.cell('J10')).toBe('1,234,567 đ')
+    expect(s.cell('J11')).toBe('Mon 15/01')
+    expect(v.errors).toEqual([])
+  })
+
+  test('P2-037: text tilted from the bar is shown whole: its row grows, and it goes out over the cells to the right', async () => {
+    const v = await open()
+    await v.typeCell('J10', 'Rotate this text 45')
+    await v.clickCell('J10')
+    const before = (await cellBox(v, 'J10'))!.h
+    await v.pick('Text rotation', 'Tilt up')
+    await v.page.waitForTimeout(500)
+    await v.clickCell('L12')
+    const p = await v.cellPoint('J10')
+    const box = await v.page.evaluate(({ x, y }) => {
+      const cell = document.elementsFromPoint(x, y).map((e) => e.closest<HTMLElement>('.de-cell')).find(Boolean)!
+      const c = cell.getBoundingClientRect()
+      const t = cell.querySelector('span')!.getBoundingClientRect()
+      return { top: c.top, bottom: c.bottom, left: c.left, h: c.height, tTop: t.top, tBottom: t.bottom, tLeft: t.left }
+    }, p)
+    expect(box.h).toBeGreaterThan(before + 30)
+    // the turned text is inside the rows of its cell, and starts in it
+    expect(box.tTop).toBeGreaterThanOrEqual(box.top - 1)
+    expect(box.tBottom).toBeLessThanOrEqual(box.bottom + 1)
+    expect(box.tLeft).toBeGreaterThanOrEqual(box.left - 1)
+    expect(v.errors).toEqual([])
+  })
+
   test('N1-021: at 390 px wide every button of the top bar can be reached', async () => {
     const v = await viewer({ src: 'samples/sample.xlsx', onSave: true }, { viewport: { width: 390, height: 844 } })
     const r = await v.page.evaluate(() => {
@@ -890,14 +959,25 @@ describe('xlsx layout (QA 19/11/2026, N1-021, N1-023)', () => {
 })
 
 describe('xlsx rendering (QA 19/11/2026, P2-037)', () => {
+  // a shared string with parts in fonts of their own
+  const RICH = {
+    parts: {
+      'xl/sharedStrings.xml':
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">' +
+        '<si><r><rPr><b/><color rgb="FFFF0000"/></rPr><t>Bold</t></r><r><t xml:space="preserve"> then plain</t></r></si></sst>',
+    },
+    rels: '<Relationship Id="rIdSst" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>',
+    types: '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
+  }
+
   test('pattern fills are mixed colors, diagonal borders are drawn, shrink to fit scales the text', async () => {
     const styles =
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
       '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"><fgColor rgb="FFFF0000"/><bgColor rgb="FFFFFFFF"/></patternFill></fill></fills>' +
       '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border diagonalUp="1" diagonalDown="1"><left/><right/><top/><bottom/><diagonal style="thin"><color rgb="FFFF0000"/></diagonal></border></borders>' +
-      '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="1" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1"/>' +
-      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment shrinkToFit="1"/></xf></cellXfs></styleSheet>'
-    const blob = await book({ sheets: [{ name: 'Look', rows: rows([[{ s: 1, v: 'pat' }, { s: 2, v: 'dia' }, { s: 3, v: 'shrink this long text into its cell' }, 'plain long text that is not shrunk at all']]) }], styles })
+      '<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="1" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="1"/>' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment shrinkToFit="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment textRotation="45"/></xf></cellXfs></styleSheet>'
+    const blob = await book({ sheets: [{ name: 'Look', rows: rows([[{ s: 1, v: 'pat' }, { s: 2, v: 'dia' }, { s: 3, v: 'shrink this long text into its cell' }, 'plain long text that is not shrunk at all'], [{ s: 4, v: 'Rotate 45 degrees' }]]) + '<row r="3"><c r="A3" t="s"><v>0</v></c></row>' }], styles, ...RICH })
     const b64 = Buffer.from(await blob.arrayBuffer()).toString('base64')
     const v = await viewer({ src: `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${b64}`, name: 'look.xlsx' })
     const look = (text: string) =>
@@ -915,6 +995,25 @@ describe('xlsx rendering (QA 19/11/2026, P2-037)', () => {
     expect(sh.transform).toContain('scale(')
     expect(sh.textW).toBeLessThanOrEqual(sh.cellW)
     expect((await look('plain long text that is not shrunk at all')).transform).toBe('')
+    // tilted text in a row that says no height: the row is as tall as the text needs, in the view
+    const tilt = await v.page.evaluate(() => {
+      const cell = [...document.querySelectorAll<HTMLElement>('.de-cell')].find((c) => c.textContent === 'Rotate 45 degrees')!
+      const c = cell.getBoundingClientRect()
+      const t = cell.querySelector('span')!.getBoundingClientRect()
+      return { h: c.height, top: c.top, bottom: c.bottom, tTop: t.top, tBottom: t.bottom }
+    })
+    expect(tilt.h).toBeGreaterThan(60)
+    expect(tilt.tTop).toBeGreaterThanOrEqual(tilt.top - 1)
+    expect(tilt.tBottom).toBeLessThanOrEqual(tilt.bottom + 1)
+    // rich text: each part in its font
+    const rich = await v.page.evaluate(() => {
+      const cell = [...document.querySelectorAll<HTMLElement>('.de-cell')].find((c) => c.textContent === 'Bold then plain')!
+      return [...cell.querySelectorAll<HTMLElement>('span > span')].map((x) => ({ t: x.textContent, w: getComputedStyle(x).fontWeight, color: getComputedStyle(x).color }))
+    })
+    expect(rich.map((x) => x.t)).toEqual(['Bold', ' then plain'])
+    expect(Number(rich[0].w)).toBeGreaterThanOrEqual(700)
+    expect(rich[0].color).toBe('rgb(255, 0, 0)')
+    expect(Number(rich[1].w)).toBeLessThan(700)
     expect(v.errors).toEqual([])
   })
 })
@@ -950,7 +1049,8 @@ describe('xlsx whole columns and rows (QA 19/11/2026, P2-042)', () => {
     // the column holds what was typed and where the row crosses it, not a cell per row
     expect((xml.match(/<c r="M\d+"/g) ?? []).length).toBeLessThan(10)
 
-    // Undo takes the formats back, one at a time
+    // Undo takes the formats back, one at a time (the Save button has the focus: back to the grid)
+    await v.clickCell('J10')
     await v.page.keyboard.press('Control+z')
     await v.page.waitForTimeout(300)
     expect((await cellBox(v, 'K22'))?.style ?? '').not.toMatch(yellow)

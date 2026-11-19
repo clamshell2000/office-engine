@@ -329,6 +329,18 @@ describe('P2-030: protection', () => {
     await paste(0, 1)
   })
 
+  test('locked cells are not cut: the paste that moves them is refused, on a sheet that is not protected too', async () => {
+    const o = await openBook(await book({ styles: XF_STYLES, sheets: [{ name: 'S', rows: grid, tail: '<sheetProtection sheet="1"/>' }, { name: 'Free', rows: rows([[0]]) }] }))
+    await o.load(1)
+    const clip: any = await o.engine.call('xlsx.copy', [0, { r0: 0, c0: 0, r1: 0, c1: 0 }])
+    const op = { op: 'paste', range: { r0: 4, c0: 0, r1: 4, c1: 0 }, cells: clip.cells, from: { sheet: clip.sheet, r0: 0, c0: 0 } }
+    await expect(o.engine.call('xlsx.sheetOp', [1, { ...op, moved: true }])).rejects.toThrow(/protected.*cut/i)
+    expect(await o.shown(1, 4, 0)).toBe('')
+    // copied, they are pasted
+    await o.engine.call('xlsx.sheetOp', [1, op])
+    expect(await o.shown(1, 4, 0)).toBe('1')
+  })
+
   test('a cell in a column or row formatted unlocked is unlocked', async () => {
     const o = await openBook(await sheet('<sheetProtection sheet="1"/>', '<cols><col min="4" max="4" width="9" style="1"/></cols>'))
     await o.set(0, 'D5', 'x')

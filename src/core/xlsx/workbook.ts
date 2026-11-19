@@ -4,7 +4,8 @@ import type { LoadReport, RowPages, SheetLoader } from './import'
 import { toCsv } from '../convert'
 import { parseTheme, type Theme } from '../theme'
 import { Calc } from './calc'
-import { kid, kids, parseXmlStream, type Attrs, type SaxHandler } from '../xml'
+import { kid, kids, parseXmlStream, type Attrs, type SaxHandler, type XEl } from '../xml'
+import { sheetColor } from '../color'
 import { formatValue, formatText } from './numfmt'
 import { parseSheetStyles, type SheetStyles } from './styles'
 import { expandShared, formulaAt } from './structure'
@@ -12,7 +13,7 @@ import { stripFunctionPrefixes } from './formula'
 import { isoToSerial } from './formula/dates'
 import type { Shift } from './follow'
 import { MAX_COL, MAX_ROWS, MAX_COL_WIDTH, MAX_ROW_HEIGHT_PT, ooxmlCapped, ooxmlInt, ooxmlNumber } from './limits'
-import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowAttrs, RowOut, SheetInfo, SheetProgress, WorkbookMeta } from './types'
+import type { BlockOut, CellDetail, CellOut, ColInfo, FindMatch, FindOptions, Merge, RowAttrs, RowOut, SheetInfo, SheetProgress, TextRun, WorkbookMeta } from './types'
 
 export const T_NUM = 0
 export const T_SST = 1
@@ -427,19 +428,58 @@ const CLOCK = /(?:^|[^A-Za-z0-9_.])(?:TODAY|NOW|RAND|RANDBETWEEN)\s*\(/i
 
 class SstHandler implements SaxHandler {
   strings: string[] = []
+  /** the strings that are rich text (parts with fonts of their own), by index */
+  rich = new Map<number, TextRun[]>()
   private cur = ''
   private capture = false
-  open(name: string): boolean | void {
-    if (name === 'si') this.cur = ''
-    else if (name === 't') this.capture = true
-    else if (name === 'rPh' || name === 'phoneticPr') return true
+  private runs: TextRun[] | null = null
+  private run: TextRun | null = null
+  private inPr = false
+  constructor(private color: (a: Attrs) => string | undefined = () => undefined) {}
+  open(name: string, a: Attrs): boolean | void {
+    if (name === 'si') {
+      this.cur = ''
+      this.runs = null
+    } else if (name === 't') {
+      this.capture = true
+      // (text outside a run, in a string that has runs: a part in the cell's font)
+      if (!this.run && this.runs) this.runs.push({ t: '' })
+    } else if (name === 'rPh' || name === 'phoneticPr') return true
+    else if (name === 'r') {
+      this.run = { t: '' }
+      ;(this.runs ??= this.cur ? [{ t: this.cur }] : []).push(this.run)
+    } else if (name === 'rPr') {
+      this.inPr = true
+      if (this.run) this.run.own = true
+    } else if (this.inPr && this.run) {
+      const r = this.run
+      const on = a.val !== '0' && a.val !== 'false'
+      if (name === 'b') r.b = on
+      else if (name === 'i') r.i = on
+      else if (name === 'strike') r.strike = on
+      else if (name === 'u') r.u = a.val !== 'none'
+      else if (name === 'color') r.color = this.color(a)
+      else if (name === 'sz') r.sz = Number(a.val) > 0 && Number(a.val) <= 409 ? Number(a.val) : undefined
+      else if (name === 'rFont') r.font = a.val
+      else if (name === 'vertAlign') r.va = a.val === 'superscript' || a.val === 'subscript' ? a.val : undefined
+    }
   }
   close(name: string): void {
     if (name === 't') this.capture = false
-    else if (name === 'si') this.strings.push(decodeX(this.cur))
+    else if (name === 'rPr') this.inPr = false
+    else if (name === 'r') this.run = null
+    else if (name === 'si') {
+      const runs = this.runs?.filter((r) => r.t)
+      // (a string of one font is a plain one)
+      if (runs?.some((r) => r.own)) this.rich.set(this.strings.length, runs.map((r) => ({ ...r, t: decodeX(r.t) })))
+      this.strings.push(decodeX(this.cur))
+      this.runs = null
+    }
   }
   text(t: string): void {
-    if (this.capture) this.cur += t
+    if (!this.capture) return
+    this.cur += t
+    if (this.runs?.length) this.runs[this.runs.length - 1].t += t
   }
 }
 
@@ -478,6 +518,8 @@ export class XlsxWorkbook {
   comments = new XlsxComments()
   readonly calc = new Calc(this)
   sst: string[] = []
+  /** the shared strings that are rich text, by index: the parts with a font of their own */
+  rich = new Map<number, TextRun[]>()
   /** `<workbookProtection lockStructure>`: sheets cannot be added, renamed, deleted or moved */
   lockStructure = false
   private sstLoading?: Promise<void>
@@ -537,8 +579,9 @@ export class XlsxWorkbook {
       this.sstLoading = (async () => {
         const rel = relOfType(this.rels, 'sharedStrings')
         if (!rel || !this.pkg.has(rel.target)) return
-        const h = new SstHandler()
+        const h = new SstHandler((a) => sheetColor({ a } as XEl, this.theme))
         this.sst = h.strings
+        this.rich = h.rich
         await parseXmlStream(await this.pkg.stream(rel.target, onProgress), h)
       })()
     }
@@ -723,9 +766,13 @@ export class XlsxWorkbook {
             cells.push(f.color ? [c, f.text, s, 1, f.color] : [c, f.text, s, 1])
             break
           }
-          case T_SST:
-            cells.push([c, formatText(this.sst[v as number] ?? '', xf.numFmt), s, 0])
+          case T_SST: {
+            const str = this.sst[v as number] ?? ''
+            const text = formatText(str, xf.numFmt)
+            const runs = text === str ? this.rich.get(v as number) : undefined
+            cells.push(runs ? [c, text, s, 0, undefined, runs] : [c, text, s, 0])
             break
+          }
           case T_STR:
             cells.push([c, formatText(v as string, xf.numFmt), s, 0])
             break

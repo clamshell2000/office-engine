@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type MutableRefObject, type ReactNode } from 'react'
-import type { BookOp, CellDetail, ClipCell, CellInput, CellOut, FindMatch, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, WorkbookMeta, XlsxClip, XlsxEditResult } from '../../core/xlsx/types'
+import type { BookOp, CellDetail, ClipCell, CellInput, CellOut, FindMatch, FindOptions, FmtPatch, Merge, Range, SheetOp, SheetProgress, TextRun, WorkbookMeta, XlsxClip, XlsxEditResult } from '../../core/xlsx/types'
 import { parseTsv, tsvCell } from '../../core/xlsx/clip'
 import { colName, MAX_ROWS } from '../../core/xlsx/workbook'
 import { detectSeparator, parseCsv } from '../../core/convert'
@@ -21,12 +21,13 @@ import { Axis } from './axis'
 import { drawingBox, drawingEl, drawingExtent, useSheetDrawings } from './drawings'
 import { fitNumber, fontPx } from './fit'
 import { htmlToTsv } from './html'
-import { textWidth, wrapHeight } from './measure'
+import { fontOf, rotatedHeight, textWidth, wrapHeight } from './measure'
 import { sheetPrintable } from './print'
 import { useCommentsCtl, useCommentsState, type CommentsCtl, type PlacedThread } from '../comments/Comments'
 import { COMMENT_KEYS } from '../comments/CommentsPanel'
 import type { CommentThread } from '../../core/comments'
 import { cssColor, cssPaint } from '../../core/color'
+import { cssFont } from '../../core/fonts'
 import { dict } from '../../core/dict'
 
 const BLOCK = 128
@@ -556,6 +557,36 @@ function rotated(rot: number): CSSProperties {
   return { display: 'inline-block', transform: `rotate(${-rot}deg)`, whiteSpace: 'nowrap' }
 }
 
+/**
+ * Tilted text, as Excel draws it: from the bottom left corner of its cell upwards (from the top left one downwards),
+ * out over the cells to the right. `line` is the height of a line of it.
+ */
+function tilted(rot: number, line: number): CSSProperties {
+  const up = rot > 0
+  return {
+    display: 'inline-block', flex: 'none', whiteSpace: 'nowrap', transform: `rotate(${-rot}deg)`, transformOrigin: up ? 'left bottom' : 'left top',
+    alignSelf: up ? 'flex-end' : 'flex-start', marginLeft: Math.ceil(line * Math.sin((Math.abs(rot) * Math.PI) / 180)),
+  }
+}
+
+/** the font of a part of a rich text: what its run properties say, and nothing of the cell's font where they are silent */
+function runCss(r: TextRun): CSSProperties | undefined {
+  if (!r.own) return undefined
+  const deco = [r.u ? 'underline' : '', r.strike ? 'line-through' : ''].filter(Boolean).join(' ')
+  const css: CSSProperties = { fontWeight: r.b ? 700 : 400, fontStyle: r.i ? 'italic' : 'normal' }
+  if (deco) css.textDecoration = deco
+  const color = r.color && cssColor(r.color)
+  if (color) css.color = color
+  if (r.sz) css.fontSize = `${r.va ? r.sz * 0.7 : r.sz}pt`
+  else if (r.va) css.fontSize = '0.7em'
+  if (r.font) css.fontFamily = cssFont(r.font)
+  if (r.va) css.verticalAlign = r.va === 'superscript' ? 'super' : 'sub'
+  return css
+}
+
+/** the tallest a row grows to show its text (Excel's limit: 409 pt) */
+const MAX_FIT_ROW = 545
+
 const JUSTIFY: Record<string, string> = dict({ center: 'center', right: 'flex-end', left: 'flex-start', justify: 'flex-start' })
 
 interface Selection {
@@ -719,6 +750,30 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   const styles = meta.styles
   const basePx = fontPx(meta.baseFont.fontSize, 14.67)
   const mergeAt = (r: number, c: number) => s.merges.find((m) => r >= m.r0 && r <= m.r1 && c >= m.c0 && c <= m.c1)
+
+  // A row that says no height shows its turned text whole: Excel fits such rows when it opens the file. In the view
+  // only: nothing is written, and the file still leaves the height to who opens it.
+  useLayoutEffect(() => {
+    let grew = false
+    for (const [a, b] of [[0, frozen.rows - 1], [r0, r1]]) {
+      for (let r = a; r <= b; r++) {
+        if (rowAxis.size(r) !== rowAxis.def) continue
+        let h = 0
+        for (const [c, text, si] of store.row(sheet, r) ?? []) {
+          const css = styles[si] as Record<string, string | number> | undefined
+          if (!text || !css?.textRotate) continue
+          // (a cell merged over several rows has them all to show its text)
+          const m = s.merges.length ? mergeAt(r, c) : undefined
+          if (!m || m.r0 === m.r1) h = Math.max(h, Math.min(MAX_FIT_ROW, rotatedHeight(text, css, meta.baseFont as Record<string, string>, basePx, Number(css.textRotate))))
+        }
+        if (h > rowAxis.def) {
+          rowAxis.set(r, h)
+          grew = true
+        }
+      }
+    }
+    if (grew) store.emit()
+  })
   const rect = withMerges(rectOf(sel), s.merges)
   /** one cell, or exactly one merged cell */
   const oneCell = (rect.r0 === rect.r1 && rect.c0 === rect.c1) || s.merges.some((m) => m.r0 === rect.r0 && m.c0 === rect.c0 && m.r1 === rect.r1 && m.c1 === rect.c1)
@@ -778,13 +833,13 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
         for (let c = Math.max(m.c0, cc0); c <= Math.min(m.c1, cc1); c++) covered.add(r * 16384 + c)
     }
     const cellEl = (r: number, cell: CellOut, wOverride?: number, hOverride?: number, filled?: Set<number>, merged = false) => {
-      const [c, raw, si, kind, color] = cell
+      const [c, raw, si, kind, color, runs] = cell
       const cw = wOverride ?? colAxis.size(c)
       const ch = hOverride ?? rowAxis.size(r)
       if (!cw || !ch) return null
       const css = (styles[si] ?? {}) as Record<string, string | number>
       let text = raw
-      if (kind === 1 && raw) text = fitNumber(raw, cw - 6, fontPx(css.fontSize, basePx))
+      if (kind === 1 && raw) text = fitNumber(raw, cw - 6, fontPx(css.fontSize, basePx), fontOf(css, meta.baseFont as Record<string, string>, basePx))
       const { textAlign, textRotate, alignItems, whiteSpace, shrinkToFit, ...rest } = css
       // the fill is a color or a gradient of colors, never more: `background` would load a url() in it
       if (rest.background !== undefined) rest.background = cssPaint(rest.background) as string
@@ -811,6 +866,9 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
       // a merged cell hides the gridlines inside it (its own right / bottom edge lines stay visible)
       if (merged && !rest.background) style.background = 'linear-gradient(#fff, #fff) 0 0 / calc(100% - 1px) calc(100% - 1px) no-repeat'
       const overflow = ov > cw
+      // tilted text goes out over the cells to the right, not over the rows above and below
+      const tilt = !!text && rot !== 0 && Math.abs(rot) < 90 && !whiteSpace && justify === 'flex-start'
+      if (tilt) Object.assign(style, { overflow: 'visible', clipPath: 'inset(0 -4000px 0 0)' })
       // shrink to fit: the text scaled down until it fits the cell
       let shrink: CSSProperties | undefined
       if (shrinkToFit && text && !rot && !whiteSpace) {
@@ -819,7 +877,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
       }
       return (
         <div key={`${r}:${c}`} className={overflow ? 'de-cell de-ov' : 'de-cell'} style={style}>
-          {text && <span style={rot ? rotated(rot) : overflow ? { maxWidth: ov - 6, overflow: 'hidden', flex: 'none' } : shrink}>{text}</span>}
+          {text && <span style={tilt ? tilted(rot, fontPx(css.fontSize, basePx) * 1.2) : rot ? rotated(rot) : overflow ? { maxWidth: ov - 6, overflow: 'hidden', flex: 'none' } : shrink}>{runs ? runs.map((x, i) => <span key={i} style={runCss(x)}>{x.t}</span>) : text}</span>}
         </div>
       )
     }
@@ -1411,10 +1469,11 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
         if (c < range.c0 || c > range.c1 || kind !== 1 || !text || (meta.formats[si] ?? 'General') === 'General' || live.colAxis.size(c) !== live.colAxis.def) continue
         const css = (styles[si] ?? {}) as Record<string, string | number>
         const px = fontPx(css.fontSize, basePx)
-        if (fitNumber(text, live.colAxis.size(c) - 6, px) === text) continue
+        const font = fontOf(css, meta.baseFont as Record<string, string>, basePx)
+        if (fitNumber(text, live.colAxis.size(c) - 6, px, font) === text) continue
         // as wide as the text, and as wide as the grid needs to show it whole (it decides, by its own measure, between the number and ####)
         let w = Math.ceil(textWidth(text, css, meta.baseFont as Record<string, string>, basePx)) + 12
-        while (w < 400 && fitNumber(text, w - 6, px) !== text) w += 6
+        while (w < 400 && fitNumber(text, w - 6, px, font) !== text) w += 6
         need.set(c, Math.max(need.get(c) ?? 0, w))
       }
     }
@@ -1451,7 +1510,8 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
       for (const [c, text, si] of cells) {
         if (!text) continue
         const css = (styles[si] ?? {}) as Record<string, string | number>
-        if (css.whiteSpace === 'pre-wrap') h = Math.max(h, wrapHeight(text, css, meta.baseFont as Record<string, string>, basePx, live.colAxis.size(c) - 6))
+        if (css.textRotate) h = Math.max(h, Math.min(MAX_FIT_ROW, rotatedHeight(text, css, meta.baseFont as Record<string, string>, basePx, Number(css.textRotate))))
+        else if (css.whiteSpace === 'pre-wrap') h = Math.max(h, wrapHeight(text, css, meta.baseFont as Record<string, string>, basePx, live.colAxis.size(c) - 6))
         else if (shrink) h = Math.max(h, Math.ceil(fontPx(css.fontSize, basePx) * 1.2) + 3)
       }
       if (h && (shrink ? h !== live.rowAxis.size(r) : h > live.rowAxis.size(r))) sizes.push([r, h])

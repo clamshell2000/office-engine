@@ -562,6 +562,12 @@ export class XlsxEditor {
 
   /** what a protected sheet allows, for each operation on it */
   private guardOp(d: SheetData, op: SheetOp) {
+    if (op.op === 'paste' && op.moved) {
+      // cells cut leave their place: the sheet they come from (it may be another one) has its say
+      const from = this.wb.sheetsData.get(this.wb.sheets.findIndex((x) => x.path === op.from.sheet))
+      const w = op.cells.reduce((m, row) => Math.max(m, row.length), 0)
+      if (from?.protection && op.cells.length && w) this.denyLocked(from, { r0: op.from.r0, c0: op.from.c0, r1: op.from.r0 + op.cells.length - 1, c1: op.from.c0 + w - 1 }, 'cut')
+    }
     if (!d.protection) return
     switch (op.op) {
       case 'insertRows':

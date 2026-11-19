@@ -64,8 +64,24 @@ export interface SheetProgress {
   recalc?: boolean
 }
 
-/** [col, text, styleIndex, kind (0 text,1 number,2 center), color?] */
-export type CellOut = [number, string, number, number, string?]
+/** a part of a text with a font of its own (rich text): what is not said is not set (not bold, the cell's color and size) */
+export interface TextRun {
+  t: string
+  /** the part has run properties: its font is the one they say, not the cell's */
+  own?: boolean
+  b?: boolean
+  i?: boolean
+  u?: boolean
+  strike?: boolean
+  color?: string
+  /** size in points */
+  sz?: number
+  font?: string
+  va?: 'superscript' | 'subscript'
+}
+
+/** [col, text, styleIndex, kind (0 text,1 number,2 center), color?, parts of a rich text?] */
+export type CellOut = [number, string, number, number, string?, TextRun[]?]
 
 export interface RowOut {
   r: number
