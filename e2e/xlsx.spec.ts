@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { book, rows } from '../test/xlsx-builder'
+import { book, rows, unzip } from '../test/xlsx-builder'
 import { fromB64, useBrowser, viewer, xlsxSheet, type Viewer } from './harness'
 
 useBrowser()
@@ -915,6 +915,50 @@ describe('xlsx rendering (QA 19/11/2026, P2-037)', () => {
     expect(sh.transform).toContain('scale(')
     expect(sh.textW).toBeLessThanOrEqual(sh.cellW)
     expect((await look('plain long text that is not shrunk at all')).transform).toBe('')
+    expect(v.errors).toEqual([])
+  })
+})
+
+describe('xlsx whole columns and rows (QA 19/11/2026, P2-042)', () => {
+  const yellow = /background: (rgb\(255, 255, 0\)|#ffff00)/
+  const fill = async (v: Viewer) => {
+    await v.btn('Fill color').click()
+    await v.page.locator('.de-tb-pop .de-tb-grid button[title="#ffff00"]').click()
+    await v.page.waitForTimeout(400)
+  }
+
+  test('a fill given to a column or a row selected by its header is the format of the column / row: shown in its empty cells, kept by what is typed there, saved without a cell per place', async () => {
+    const v = await open()
+    await v.page.locator('.de-head-c[data-col="12"]').click()
+    await fill(v)
+    await v.clickCell('J10')
+    expect((await cellBox(v, 'M20'))?.style ?? '').toMatch(yellow)
+    expect((await cellBox(v, 'L20'))?.style ?? '').not.toMatch(yellow)
+    await v.typeCell('M15', 'typed')
+    expect((await cellBox(v, 'M15'))?.style ?? '').toMatch(yellow)
+
+    await v.page.locator('.de-head-r[data-row="21"]').click()
+    await fill(v)
+    await v.clickCell('J10')
+    expect((await cellBox(v, 'K22'))?.style ?? '').toMatch(yellow)
+    expect((await cellBox(v, 'K23'))?.style ?? '').not.toMatch(yellow)
+
+    const z = await unzip(new Blob([(await v.save()).bytes]))
+    const xml = await z.text(z.paths.find((p) => /worksheets\/sheet1\.xml$/.test(p))!)
+    expect(xml).toMatch(/<col [^>]*min="13"[^>]*style="\d+"/)
+    expect(xml).toMatch(/<row r="22"[^>]* s="\d+"[^>]*customFormat="1"|<row r="22"[^>]*customFormat="1"[^>]* s="\d+"/)
+    // the column holds what was typed and where the row crosses it, not a cell per row
+    expect((xml.match(/<c r="M\d+"/g) ?? []).length).toBeLessThan(10)
+
+    // Undo takes the formats back, one at a time
+    await v.page.keyboard.press('Control+z')
+    await v.page.waitForTimeout(300)
+    expect((await cellBox(v, 'K22'))?.style ?? '').not.toMatch(yellow)
+    expect((await cellBox(v, 'M20'))?.style ?? '').toMatch(yellow)
+    await v.page.keyboard.press('Control+z')
+    await v.page.keyboard.press('Control+z')
+    await v.page.waitForTimeout(300)
+    expect((await cellBox(v, 'M20'))?.style ?? '').not.toMatch(yellow)
     expect(v.errors).toEqual([])
   })
 })

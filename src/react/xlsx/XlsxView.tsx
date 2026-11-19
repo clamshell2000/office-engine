@@ -35,6 +35,8 @@ const MAX_SCROLL_PX = 12_000_000
 
 interface CachedBlock {
   rows: Map<number, CellOut[]>
+  /** the format (style index) of the rows that have one of their own */
+  own: Map<number, number>
   complete: boolean
   rowsAt: number
 }
@@ -48,6 +50,8 @@ class SheetState {
   rowAxis = new Axis(20)
   colAxis = new Axis(64)
   merges: Merge[] = []
+  /** the columns that have a format of their own: [first, last, style index] */
+  colStyles: [number, number, number][] = []
   frozen = { rows: 0, cols: 0 }
   gridLines = true
   blocks = new Map<number, CachedBlock>()
@@ -57,6 +61,23 @@ class SheetState {
   scrollPos?: { x: number; y: number }
   /** a cell to select and scroll to (a comment shown from the panel); `n` changes every time */
   goto?: { r: number; c: number; n: number }
+}
+
+/** the columns of a sheet that have a format of their own (`<col style>`) */
+function colStylesOf(cols: SheetProgress['colInfo']): [number, number, number][] {
+  const out: [number, number, number][] = []
+  for (const ci of cols ?? []) {
+    const st = Number(ci.x?.style ?? 0)
+    if (st > 0) out.push([ci.min, ci.max, st])
+  }
+  return out
+}
+
+/** whether a format shows in a cell that holds nothing: a fill, a border */
+function shows(css: unknown): boolean {
+  if (!css || typeof css !== 'object') return false
+  for (const k in css as object) if (k.startsWith('background') || k.startsWith('border')) return true
+  return false
 }
 
 /**
@@ -132,6 +153,7 @@ class XlsxStore {
       s.rowAxis.def = p.defaultRowH || 20
       s.colAxis.def = p.defaultColW || 64
       for (const ci of p.colInfo ?? []) s.colAxis.setRange(ci.min, ci.max, ci.w)
+      s.colStyles = colStylesOf(p.colInfo)
       s.frozen = p.frozen ?? s.frozen
       s.gridLines = p.gridLines ?? true
     }
@@ -159,8 +181,12 @@ class XlsxStore {
         .call('xlsx.block', sheet, b * BLOCK, (b + 1) * BLOCK)
         .then((res) => {
           const rows = new Map<number, CellOut[]>()
-          for (const r of res.rows) rows.set(r.r, r.cells)
-          s.blocks.set(b, { rows, complete: res.complete, rowsAt })
+          const own = new Map<number, number>()
+          for (const r of res.rows) {
+            rows.set(r.r, r.cells)
+            if (r.s) own.set(r.r, r.s)
+          }
+          s.blocks.set(b, { rows, own, complete: res.complete, rowsAt })
           if (s.blocks.size > 400) {
             const firstKey = s.blocks.keys().next().value as number
             s.blocks.delete(firstKey)
@@ -202,6 +228,7 @@ class XlsxStore {
       s.rowAxis = new Axis(l.defaultRowH || s.rowAxis.def)
       s.colAxis = new Axis(l.defaultColW || s.colAxis.def)
       for (const ci of l.colInfo ?? []) s.colAxis.setRange(ci.min, ci.max, ci.w)
+      s.colStyles = colStylesOf(l.colInfo)
       for (const [r, px] of l.rowSizes) s.rowAxis.set(r, px)
       s.merges = l.merges ?? []
       s.frozen = l.frozen ?? s.frozen
@@ -212,12 +239,26 @@ class XlsxStore {
       this.emit()
       return
     }
-    s.cols = Math.max(s.cols, res.range.c1 + 1)
+    // (a range of whole rows reaches the last column of the sheet, not of what there is)
+    if (res.range.c1 < 16383) s.cols = Math.max(s.cols, res.range.c1 + 1)
     this.invalidate(res.sheet, res.range.r0, res.range.r1)
   }
 
   row(sheet: number, r: number): CellOut[] | undefined {
     return this.sheets.get(sheet)?.blocks.get(Math.floor(r / BLOCK))?.rows.get(r)
+  }
+
+  /**
+   * The format (style index) a place without a cell shows: its row's own, else its column's (0: none). What a
+   * whole row / column / sheet was formatted with, without a cell for every place.
+   */
+  placeStyle(sheet: number, r: number, c: number): number {
+    const s = this.sheets.get(sheet)
+    if (!s) return 0
+    const own = s.blocks.get(Math.floor(r / BLOCK))?.own.get(r)
+    if (own) return own
+    for (const [min, max, st] of s.colStyles) if (min <= c && c <= max) return st
+    return 0
   }
 
   /** whether the rows r0..r1 are here as the worker has them now (not being read, none missing) */
@@ -522,6 +563,8 @@ interface Selection {
   ac: number
   fr: number
   fc: number
+  /** selected as whole columns / rows / the sheet (a header, Ctrl+Space…), not as the cells there are: a format goes to the columns / rows themselves */
+  whole?: 'col' | 'row' | 'all'
 }
 
 interface EditState {
@@ -785,6 +828,21 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
       const cell = row?.find((x) => x[0] === m.c0) ?? ([m.c0, '', 0, 0] as CellOut)
       out.push(cellEl(m.r0, cell, colAxis.pos(m.c1 + 1) - colAxis.pos(m.c0), rowAxis.pos(m.r1 + 1) - rowAxis.pos(m.r0), undefined, true))
     }
+    // the places without a cell in rows / columns that have a format of their own show it (a fill, borders)
+    const block = (r: number) => s.blocks.get(Math.floor(r / BLOCK))
+    if (s.colStyles.length || [...new Set([block(rr0), block(rr1)])].some((b) => b?.own.size)) {
+      for (let r = rr0; r <= rr1; r++) {
+        const own = block(r)?.own.get(r)
+        if (!own && !s.colStyles.length) continue
+        const row = store.row(sheet, r)
+        const has = row?.length ? new Set(row.map((x) => x[0])) : undefined
+        for (let c = cc0; c <= cc1; c++) {
+          if (has?.has(c) || covered.has(r * 16384 + c)) continue
+          const st = own || store.placeStyle(sheet, r, c)
+          if (st && shows(styles[st])) out.push(cellEl(r, [c, '', st, 0]))
+        }
+      }
+    }
     for (let r = rr0; r <= rr1; r++) {
       const row = store.row(sheet, r)
       if (!row) continue
@@ -1003,14 +1061,14 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   // ---------------------------------------------------------------- editing
 
   const focusGrid = () => ((editable ? editRef.current : null) ?? scrollRef.current)?.focus({ preventScroll: true })
-  const selectSheet = () => setSel({ ar: 0, ac: 0, fr: Math.max(0, s.rows - 1), fc: Math.max(0, s.cols - 1) })
+  const selectSheet = () => setSel({ ar: 0, ac: 0, fr: Math.max(0, s.rows - 1), fc: Math.max(0, s.cols - 1), whole: 'all' })
   // Ctrl/⌘+A from the viewer chrome / the page; a cell being edited keeps its own select-all
   useSelectAll(() => {
     if (edit) return
     focusGrid()
     selectSheet()
   })
-  const styleOf = (r: number, c: number) => store.row(sheet, r)?.find((x) => x[0] === c)?.[2] ?? 0
+  const styleOf = (r: number, c: number) => store.row(sheet, r)?.find((x) => x[0] === c)?.[2] ?? store.placeStyle(sheet, r, c)
 
   const run = async (p: Promise<XlsxEditResult | null>) => {
     try {
@@ -1257,7 +1315,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     while (rowAxis.size(r) === 0 && r < rowAxis.count - 1) r++
     while (c > 0 && colAxis.size(c) === 0 && dc < 0) c--
     while (colAxis.size(c) === 0 && c < colAxis.count - 1) c++
-    if (extend) setSelState({ ...sel, fr: r, fc: c })
+    if (extend) setSelState({ ...sel, fr: r, fc: c, whole: undefined })
     else setSel({ ar: r, ac: c, fr: r, fc: c })
     scrollIntoView(r, c)
   }
@@ -1275,7 +1333,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   }
 
   const gotoCell = (r: number, c: number, extend: boolean) => {
-    if (extend) setSelState((p) => ({ ...p, fr: r, fc: c }))
+    if (extend) setSelState((p) => ({ ...p, fr: r, fc: c, whole: undefined }))
     else setSel({ ar: r, ac: c, fr: r, fc: c })
     scrollIntoView(r, c)
   }
@@ -1410,7 +1468,9 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
   const clearRange = () => void sheetOp({ op: 'clear', range: rect })
 
   const activeCss = (styles[styleOf(sel.ar, sel.ac)] ?? {}) as Record<string, string | number>
-  const fmt = (patch: FmtPatch) => fmtAt(rect, patch)
+  // whole columns / rows / the sheet: the format goes to them, down to the last row, not only to the cells there are
+  const fmt = (patch: FmtPatch) =>
+    fmtAt(sel.whole === 'all' ? { r0: 0, c0: 0, r1: MAX_ROW, c1: MAX_COL } : sel.whole === 'col' ? { ...rect, r0: 0, r1: MAX_ROW } : sel.whole === 'row' ? { ...rect, c0: 0, c1: MAX_COL } : rect, patch)
   const fmtAt = (range: Range, patch: FmtPatch) => {
     const done = run(client.call('xlsx.format', sheet, range, patch))
     // Wrap text shows all of the text: the rows grow; a number format shows its numbers: the columns widen
@@ -1517,8 +1577,8 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     // Shift+Space selects the row(s), Ctrl+Space the column(s) of the selection
     if (e.code === 'Space' && (e.shiftKey || mod) && !e.altKey) {
       e.preventDefault()
-      if (mod) setSel({ ar: 0, ac: rect.c0, fr: Math.max(0, s.rows - 1), fc: rect.c1 })
-      else setSel({ ar: rect.r0, ac: 0, fr: rect.r1, fc: Math.max(0, s.cols - 1) })
+      if (mod) setSel({ ar: 0, ac: rect.c0, fr: Math.max(0, s.rows - 1), fc: rect.c1, whole: 'col' })
+      else setSel({ ar: rect.r0, ac: 0, fr: rect.r1, fc: Math.max(0, s.cols - 1), whole: 'row' })
       return
     }
     if (e.key === 'Escape' && painter !== null) {
@@ -1690,12 +1750,12 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     }
     focusGrid()
     if (r < 0 && c < 0) {
-      setSel({ ar: 0, ac: 0, fr: Math.max(0, s.rows - 1), fc: Math.max(0, s.cols - 1) })
+      setSel({ ar: 0, ac: 0, fr: Math.max(0, s.rows - 1), fc: Math.max(0, s.cols - 1), whole: 'all' })
       return
     }
-    if (r < 0) setSel({ ar: 0, ac: c, fr: Math.max(0, s.rows - 1), fc: c })
-    else if (c < 0) setSel({ ar: r, ac: 0, fr: r, fc: Math.max(0, s.cols - 1) })
-    else if (e.shiftKey) setSelState({ ...sel, fr: r, fc: c })
+    if (r < 0) setSel({ ar: 0, ac: c, fr: Math.max(0, s.rows - 1), fc: c, whole: 'col' })
+    else if (c < 0) setSel({ ar: r, ac: 0, fr: r, fc: Math.max(0, s.cols - 1), whole: 'row' })
+    else if (e.shiftKey) setSelState({ ...sel, fr: r, fc: c, whole: undefined })
     else {
       setSel({ ar: r, ac: c, fr: r, fc: c })
       // a cell with a comment shows its thread
@@ -1988,7 +2048,7 @@ function SheetGrid({ store, sheet, meta, client, edit, setEdit, hold, onSheet }:
     }
     if (!dragging.current) return
     const { r, c } = cellAt(e.clientX, e.clientY, e.currentTarget as HTMLElement)
-    if (r >= 0 && c >= 0 && (r !== sel.fr || c !== sel.fc)) setSelState((p) => ({ ...p, fr: r, fc: c }))
+    if (r >= 0 && c >= 0 && (r !== sel.fr || c !== sel.fc)) setSelState((p) => ({ ...p, fr: r, fc: c, whole: undefined }))
   }
 
   const box = edit && own ? cellBox(edit.r, edit.c) : null
